@@ -10,20 +10,9 @@ import { AppError, ValidationError } from './errors';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { agendaRoutes } from '../modules/agenda/agenda.routes';
 import { gcalendarRoutes } from '../modules/agenda/gcalendar.routes';
-import { blackboardRoutes } from '../modules/blackboard/blackboard.routes';
-import { communicationsRoutes } from '../modules/communications/communications.routes';
-import { todoRoutes } from '../modules/todo/todo.routes';
 import { notificationsRoutes } from '../modules/notifications/notifications.routes';
-import { clientsRoutes } from '../modules/clients/clients.routes';
 import { operatorsRoutes } from '../modules/operators/operators.routes';
-import { newsRoutes } from '../modules/news/news.routes';
-import { deadlinesRoutes } from '../modules/deadlines/deadlines.routes';
-import { payrollRoutes } from '../modules/payroll-attendance/payroll.routes';
-import { accountingRoutes } from '../modules/accounting/accounting.routes';
-import { repositoryRoutes } from '../modules/repository/repository.routes';
-import { videoRoutes } from '../modules/video/video.routes';
-import { departmentsRoutes } from '../modules/departments/departments.routes';
-import { emailRoutes } from '../modules/email/email.routes';
+import { sharingRoutes } from '../modules/sharing/sharing.routes';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -139,20 +128,9 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(authRoutes);
   await app.register(agendaRoutes);
   await app.register(gcalendarRoutes);
-  await app.register(blackboardRoutes);
-  await app.register(communicationsRoutes);
-  await app.register(todoRoutes);
   await app.register(notificationsRoutes);
-  await app.register(clientsRoutes);
   await app.register(operatorsRoutes);
-  await app.register(newsRoutes);
-  await app.register(deadlinesRoutes);
-  await app.register(payrollRoutes);
-  await app.register(accountingRoutes);
-  await app.register(repositoryRoutes);
-  await app.register(videoRoutes);
-  await app.register(departmentsRoutes);
-  await app.register(emailRoutes);
+  await app.register(sharingRoutes);
 
   return app;
 }

@@ -6,6 +6,7 @@ import { CreateEventInput, UpdateEventInput, ListEventsQuery } from './agenda.sc
 import { Role, hasMinimumRole } from '../../core/auth/roles';
 import { syncEventToGCalAsync, deleteEventFromGCalAsync } from './gcalendar.hooks';
 import { triggerNewEvent } from '../../core/notifications/triggers';
+import { getEffectiveLevel } from '../sharing/sharing.service';
 
 // ── Types ──
 
@@ -72,8 +73,8 @@ export async function createEvent(
     const eventResult = await client.query(
       `INSERT INTO events (type, title, description, event_date, start_time, end_time,
                            has_alarm, alarm_datetime, confirmation_deadline, owner_id, metadata,
-                           recurrence_rule, created_by_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                           recurrence_rule, created_by_id, is_private)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING id`,
       [
         input.type,
@@ -89,6 +90,7 @@ export async function createEvent(
         JSON.stringify(input.metadata || {}),
         input.recurrenceRule || null,
         createdById,
+        input.isPrivate === true,
       ]
     );
 
@@ -167,10 +169,25 @@ export async function getEventById(eventId: string, requesterId: string): Promis
   );
 
   const isCreator = (event as any).created_by_id === requesterId;
+  const isOwner   = event.owner_id === requesterId;
+  const isAdmin   = hasMinimumRole(requester?.role || 'client', 'admin');
 
-  if (!isParticipant && event.owner_id !== requesterId && !isCreator && !hasMinimumRole(requester?.role || 'client', 'admin')) {
+  if (!isParticipant && !isOwner && !isCreator && !isAdmin) {
     // Operatori possono vedere le agende dei colleghi senza permessi espliciti
     if (requester?.role !== 'operator') {
+      throw new ForbiddenError('You do not have access to this event');
+    }
+  }
+
+  // ── Regola B+C: privacy "intrinseca" anche sull'accesso per ID ──
+  // Un operatore "collega" (non owner, non partecipante, non creator, non admin)
+  // non può aprire reminders altrui o eventi marcati is_private — anche se
+  // tecnicamente avrebbe accesso "in chiaro" via permesso white/write.
+  // Owner/partecipante/creator/admin continuano a vedere tutto.
+  if (!isParticipant && !isOwner && !isCreator && !isAdmin) {
+    const isPrivateEvent = (event as any).is_private === true;
+    const isReminder     = event.type === 'reminder';
+    if (isPrivateEvent || isReminder) {
       throw new ForbiddenError('You do not have access to this event');
     }
   }
@@ -333,15 +350,23 @@ export async function getCalendarEvents(
     throw new ForbiddenError('No permission to view this calendar');
   }
 
-  // Quando si guarda il calendario di un altro operatore, gli impegni e i
-  // promemoria vengono mascherati per privacy.
+  // Quando si guarda il calendario di un altro operatore, applichiamo il
+  // livello di accesso effettivo:
+  //   - admin/owner → 'white' (vedono dettagli)
+  //   - operator → 'ghost' di default; può essere alzato a 'white'/'write'
+  //     se il proprietario del calendario ha concesso esplicito permesso
+  //     in share_permissions.
   const isViewingOther = !!(operatorId && operatorId !== requesterId);
+  const accessLevel = isViewingOther
+    ? await getEffectiveLevel(targetUserId, requesterId, requesterRole, 'agenda')
+    : 'write';
+  const shouldMask = accessLevel === 'ghost';
 
   const rawEvents = await queryMany(
     `SELECT e.id, e.type, e.title, e.description,
             e.event_date::text, e.start_time::text, e.end_time::text,
             e.status, e.has_alarm, e.alarm_datetime, e.closed, e.owner_id,
-            e.recurrence_rule, e.recurrence_exceptions,
+            e.recurrence_rule, e.recurrence_exceptions, e.is_private,
             (e.owner_id = $3) as is_mine
      FROM events e
      WHERE e.id IN (
@@ -425,11 +450,20 @@ export async function getCalendarEvents(
     // Skip events the user has declined
     if (myConfirmation === 'declined') return null;
 
-    // ── Privacy masking quando si guarda il calendario di un altro operatore ──
-    if (isViewingOther) {
-      // Promemoria: nascosti del tutto (sono note personali)
-      if (e.type === 'reminder') return null;
+    // ── Regola B+C: privacy "intrinseca" dell'evento, indipendente dal level ──
+    // I promemoria sono note personali e gli eventi marcati is_private sono
+    // riservati: NON appaiono mai nel calendario di chi non sia admin/owner,
+    // a prescindere dal livello concesso (anche white/write). Admin/owner
+    // continuano a vedere tutto (loro sopra il diritto operator-vs-operator).
+    const hidesPrivate = isViewingOther && !hasMinimumRole(requesterRole, 'admin');
+    if (hidesPrivate && (e.type === 'reminder' || e.is_private === true)) {
+      return null;
+    }
 
+    // ── Privacy masking "per livello" quando si guarda il calendario di un altro ──
+    // shouldMask = true SOLO se il livello effettivo è 'ghost'.
+    // 'white' e 'write' vedono tutti i dettagli (esclusi reminder/private filtrati sopra).
+    if (shouldMask) {
       // Impegni: blocco anonimo azzurro senza titolo né dettagli
       if (e.type === 'commitment') {
         // Salta se non ha orario (non blocca slot specifici)
@@ -555,6 +589,7 @@ export async function updateEvent(
   addSet('confirmation_deadline', input.confirmationDeadline);
   if (input.metadata) addSet('metadata', JSON.stringify(input.metadata));
   if (input.recurrenceRule !== undefined) addSet('recurrence_rule', input.recurrenceRule || null);
+  if (input.isPrivate !== undefined) addSet('is_private', input.isPrivate);
 
   if (sets.length === 0) throw new BadRequestError('No fields to update');
 

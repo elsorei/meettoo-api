@@ -1,7 +1,7 @@
 {
-  "name": "studiorei-api",
+  "name": "meettoo-api",
   "version": "1.0.0",
-  "description": "Studio REI Backend API - Node.js + TypeScript + Fastify",
+  "description": "MeetToo Backend API - Node.js + TypeScript + Fastify",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
