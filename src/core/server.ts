@@ -85,7 +85,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   app.get('/health', async () => ({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    version: '1.1.1',
+    version: '1.2.0',
   }));
 
   // One-time seed endpoint: disabled in production, creates admin ONLY if no users exist

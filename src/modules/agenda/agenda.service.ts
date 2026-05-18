@@ -74,9 +74,9 @@ export async function createEvent(
     // Insert event (con created_by_id se assegnato da un altro operatore)
     const eventResult = await client.query(
       `INSERT INTO events (type, title, description, event_date, start_time, end_time,
-                           has_alarm, alarm_datetime, confirmation_deadline, owner_id, metadata,
-                           recurrence_rule, created_by_id, is_private)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                           has_alarm, alarm_datetime, alarm_minutes_before, confirmation_deadline,
+                           owner_id, metadata, recurrence_rule, created_by_id, is_private)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING id`,
       [
         input.type,
@@ -87,6 +87,7 @@ export async function createEvent(
         input.endTime || null,
         input.hasAlarm,
         input.alarmDatetime || null,
+        input.alarmMinutesBefore ?? null,
         input.confirmationDeadline || null,
         ownerId,
         JSON.stringify(input.metadata || {}),
@@ -584,6 +585,12 @@ export async function updateEvent(
   if (input.metadata) addSet('metadata', JSON.stringify(input.metadata));
   if (input.recurrenceRule !== undefined) addSet('recurrence_rule', input.recurrenceRule || null);
   if (input.isPrivate !== undefined) addSet('is_private', input.isPrivate);
+  if (input.alarmMinutesBefore !== undefined) addSet('alarm_minutes_before', input.alarmMinutesBefore);
+
+  // Riarma il promemoria se cambiano orario o anticipo.
+  if (input.eventDate !== undefined || input.startTime !== undefined || input.alarmMinutesBefore !== undefined) {
+    sets.push(`alarm_sent_at = NULL`);
+  }
 
   if (sets.length === 0) throw new BadRequestError('No fields to update');
 
@@ -654,7 +661,8 @@ export async function moveEvent(
   }
 
   await query(
-    `UPDATE events SET event_date = $1, start_time = $2, end_time = $3, updated_at = NOW()
+    `UPDATE events SET event_date = $1, start_time = $2, end_time = $3,
+            alarm_sent_at = NULL, updated_at = NOW()
      WHERE id = $4`,
     [eventDate, startTime || event.start_time, endTime || event.end_time, eventId]
   );

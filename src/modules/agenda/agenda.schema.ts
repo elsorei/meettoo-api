@@ -24,6 +24,7 @@ export const createEventSchema = z.object({
   recurrenceRule: z.string().max(500).optional(),
   forOperatorUserId: z.string().uuid().optional(), // crea evento sull'agenda di un altro operatore
   isPrivate: z.boolean().optional().default(false), // 🔒 evento privato: solo owner/partecipanti/admin lo vedono
+  alarmMinutesBefore: z.number().int().min(0).max(10080).optional(), // promemoria: minuti prima dell'inizio
 }).refine((data) => {
   if (data.type !== 'reminder') {
     return !!data.startTime && !!data.endTime;
@@ -54,6 +55,7 @@ export const updateEventSchema = z.object({
   })).optional(),
   recurrenceRule: z.string().max(500).optional().nullable(),
   isPrivate: z.boolean().optional(), // 🔒 toggle privacy per evento
+  alarmMinutesBefore: z.number().int().min(0).max(10080).optional().nullable(), // promemoria: minuti prima
 });
 
 // ── Change status ──

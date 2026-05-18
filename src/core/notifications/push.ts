@@ -61,6 +61,8 @@ export async function sendPushToUser(
       token: user.fcm_token,
       notification: { title, body },
       data: { ...(data || {}), badge: badgeCount },
+      android: { notification: { sound: 'default' } },
+      apns: { payload: { aps: { sound: 'default' } } },
       webpush: {
         notification: {
           title,
@@ -111,6 +113,8 @@ export async function sendPushToUsers(
         token: row.fcm_token,
         notification: { title, body },
         data: data || {},
+        android: { notification: { sound: 'default' } },
+        apns: { payload: { aps: { sound: 'default' } } },
         webpush: {
           notification: { title, body, icon: '/icons/icon-192x192.png', badge: '/icons/icon-96x96.png', tag: data?.type || 'general' },
           fcmOptions: { link: data?.url || '/dashboard' },

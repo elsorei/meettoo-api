@@ -7,6 +7,7 @@ import { getPool, closePool } from './config/database';
 import { closeRedis } from './config/redis';
 import { initSocketIO, closeSocketIO } from './core/websocket/socket';
 import { initFirebase } from './core/notifications/push';
+import { startReminderScheduler } from './core/notifications/reminder-scheduler';
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 
@@ -72,6 +73,9 @@ async function main() {
 
     // Initialize Firebase for push notifications
     initFirebase();
+
+    // Start the reminder scheduler (checks due reminders every minute)
+    startReminderScheduler();
   } catch (err) {
     app.log.error(err);
     process.exit(1);
