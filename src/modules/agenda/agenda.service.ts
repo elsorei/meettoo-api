@@ -729,7 +729,7 @@ export async function confirmParticipation(
   userId: string,
   confirmation: string
 ): Promise<any> {
-  const participant = await queryOne(
+  const participant = await queryOne<{ role: string; confirmation: string }>(
     `SELECT * FROM event_participants WHERE event_id = $1 AND user_id = $2`,
     [eventId, userId]
   );
@@ -762,6 +762,44 @@ export async function confirmParticipation(
         await createNotification({ userId: ev.owner_id, type: 'event_confirmed', title: 'Tutti hanno confermato', body: `"${ev.title}" è ora confermato`, data: { eventId } });
         setImmediate(() => sendPushToUser(ev.owner_id, '✅ Evento confermato', `"${ev.title}" — tutti i partecipanti hanno accettato`, { type: 'event_confirmed', eventId, url: '/agenda' }).catch(() => {}));
       }
+    }
+  }
+
+  // Un convocato principale ha rifiutato: "chiama" un riservista al suo posto.
+  if (
+    confirmation === 'declined' &&
+    participant.role === 'participant' &&
+    participant.confirmation !== 'declined'
+  ) {
+    const reserve = await queryOne<{ user_id: string }>(
+      `SELECT user_id FROM event_participants
+       WHERE event_id = $1 AND role = 'reserve' AND confirmation <> 'declined'
+       LIMIT 1`,
+      [eventId]
+    );
+    if (reserve) {
+      await query(
+        `UPDATE event_participants
+         SET role = 'participant', confirmation = 'pending', confirmed_at = NULL
+         WHERE event_id = $1 AND user_id = $2`,
+        [eventId, reserve.user_id]
+      );
+      const ev = await queryOne<{ title: string }>(`SELECT title FROM events WHERE id = $1`, [eventId]);
+      const { createNotification } = await import('../notifications/notifications.service');
+      const { sendPushToUser } = await import('../../core/notifications/push');
+      await createNotification({
+        userId: reserve.user_id,
+        type: 'reserve_called',
+        title: 'Sei stato chiamato',
+        body: `Un posto si è liberato per "${ev?.title}". Confermi?`,
+        data: { eventId },
+      });
+      setImmediate(() => sendPushToUser(
+        reserve.user_id,
+        'Sei stato chiamato',
+        `Un posto si è liberato per "${ev?.title}" — confermi la presenza?`,
+        { type: 'reserve_called', eventId, url: '/agenda' }
+      ).catch(() => {}));
     }
   }
 
