@@ -110,7 +110,7 @@ export const availabilityQuerySchema = z.object({
 // ── Add participant ──
 export const addParticipantSchema = z.object({
   userId: z.string().uuid(),
-  role: z.enum(['organizer', 'participant']).default('participant'),
+  role: z.enum(['organizer', 'participant', 'reserve']).default('participant'),
 });
 
 // ── Types ──
