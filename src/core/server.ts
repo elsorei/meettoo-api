@@ -27,9 +27,8 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   // CORS
   const allowedOrigins = [
-    'http://localhost:3001',
-    'http://localhost:3000',
-    /\.railway\.app$/,          // tutti i sottodomini Railway (dev + prod)
+    /^http:\/\/localhost(:\d+)?$/, // sviluppo locale (Expo web su qualsiasi porta)
+    /\.railway\.app$/,             // tutti i sottodomini Railway (dev + prod)
     /\.up\.railway\.app$/,
   ];
   await app.register(cors, {
