@@ -44,6 +44,7 @@ interface ParticipantRow {
   username: string;
   user_role: string;
   display_name: string;
+  photo_url: string | null;
 }
 
 interface AttachmentRow {
@@ -140,16 +141,13 @@ export async function createEvent(
 export async function getEventById(eventId: string, requesterId: string): Promise<any> {
   const event = await queryOne<EventRow & { owner_name: string; owner_photo: string | null; created_by_name: string | null; created_by_photo: string | null }>(
     `SELECT e.*, e.event_date::text as event_date,
-            COALESCE(o.first_name || ' ' || o.last_name, c.business_name, u.username) as owner_name,
-            o.photo as owner_photo,
-            COALESCE(ocb.first_name || ' ' || ocb.last_name, ucb.username) as created_by_name,
-            ocb.photo as created_by_photo
+            COALESCE(u.name, u.username) as owner_name,
+            u.photo_url as owner_photo,
+            COALESCE(ucb.name, ucb.username) as created_by_name,
+            ucb.photo_url as created_by_photo
      FROM events e
      JOIN users u ON u.id = e.owner_id
-     LEFT JOIN operators o ON o.user_id = e.owner_id
-     LEFT JOIN clients c ON c.user_id = e.owner_id
      LEFT JOIN users ucb ON ucb.id = e.created_by_id
-     LEFT JOIN operators ocb ON ocb.user_id = e.created_by_id
      WHERE e.id = $1`,
     [eventId]
   );
@@ -196,15 +194,10 @@ export async function getEventById(eventId: string, requesterId: string): Promis
   const participants = await queryMany<ParticipantRow>(
     `SELECT ep.id, ep.event_id, ep.user_id, ep.role, ep.confirmation, ep.confirmed_at,
             u.username, u.role as user_role,
-            COALESCE(
-              o.first_name || ' ' || o.last_name,
-              c.business_name,
-              u.username
-            ) as display_name
+            COALESCE(u.name, u.username) as display_name,
+            u.photo_url
      FROM event_participants ep
      JOIN users u ON u.id = ep.user_id
-     LEFT JOIN operators o ON o.user_id = u.id
-     LEFT JOIN clients c ON c.user_id = u.id
      WHERE ep.event_id = $1
      ORDER BY ep.role DESC, ep.confirmation`,
     [eventId]
@@ -306,18 +299,12 @@ export async function listEvents(
             e.start_time::text, e.end_time::text, e.status,
             e.has_alarm, e.alarm_datetime, e.closed,
             e.owner_id, e.created_at, e.updated_at,
-            COALESCE(
-              o.first_name || ' ' || o.last_name,
-              c.business_name,
-              owner_u.username
-            ) as owner_name,
+            COALESCE(owner_u.name, owner_u.username) as owner_name,
             (SELECT COUNT(*) FROM event_participants WHERE event_id = e.id) as participant_count,
             (SELECT COUNT(*) FROM event_attachments WHERE event_id = e.id) as attachment_count,
             (SELECT ep_me.confirmation FROM event_participants ep_me WHERE ep_me.event_id = e.id AND ep_me.user_id = $${paramIndex}) as my_confirmation
      FROM events e
      LEFT JOIN users owner_u ON owner_u.id = e.owner_id
-     LEFT JOIN operators o ON o.user_id = e.owner_id
-     LEFT JOIN clients c ON c.user_id = e.owner_id
      WHERE e.id IN (
        SELECT DISTINCT e2.id FROM events e2
        LEFT JOIN event_participants ep ON ep.event_id = e2.id
@@ -424,12 +411,10 @@ export async function getCalendarEvents(
   const eventIds = events.map((e: any) => e.id);
   const participants = eventIds.length > 0 ? await queryMany(
     `SELECT ep.event_id, ep.user_id, ep.role, ep.confirmation,
-            COALESCE(o.first_name || ' ' || o.last_name, c.business_name, u.username) as display_name,
+            COALESCE(u.name, u.username) as display_name,
             u.role as user_role
      FROM event_participants ep
      JOIN users u ON u.id = ep.user_id
-     LEFT JOIN operators o ON o.user_id = u.id
-     LEFT JOIN clients c ON c.user_id = u.id
      WHERE ep.event_id = ANY($1)`,
     [eventIds]
   ) : [];
@@ -772,11 +757,6 @@ export async function confirmParticipation(
       // Notifica l'organizzatore che tutti hanno confermato
       if (updated.rowCount && updated.rowCount > 0) {
         const ev = updated.rows[0];
-        const confirmerName = await queryOne<{ name: string }>(
-          `SELECT COALESCE(o.first_name || ' ' || o.last_name, c.business_name, u.username) as name
-           FROM users u LEFT JOIN operators o ON o.user_id = u.id LEFT JOIN clients c ON c.user_id = u.id
-           WHERE u.id = $1`, [userId]
-        );
         const { createNotification } = await import('../notifications/notifications.service');
         const { sendPushToUser } = await import('../../core/notifications/push');
         await createNotification({ userId: ev.owner_id, type: 'event_confirmed', title: 'Tutti hanno confermato', body: `"${ev.title}" è ora confermato`, data: { eventId } });
