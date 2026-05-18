@@ -7,6 +7,7 @@ import { Role, hasMinimumRole } from '../../core/auth/roles';
 import { syncEventToGCalAsync, deleteEventFromGCalAsync } from './gcalendar.hooks';
 import { triggerNewEvent } from '../../core/notifications/triggers';
 import { getEffectiveLevel } from '../sharing/sharing.service';
+import { invalidateEvent } from './availability-engine';
 
 // ── Types ──
 
@@ -133,6 +134,7 @@ export async function createEvent(
     });
   }
 
+  await invalidateEvent(eventId);
   return getEventById(eventId, ownerId);
 }
 
@@ -547,6 +549,13 @@ export async function updateEvent(
   );
   if (!event) throw new NotFoundError('Event not found');
 
+  const beforeParticipantIds = (
+    await queryMany<{ user_id: string }>(
+      `SELECT user_id FROM event_participants WHERE event_id = $1`,
+      [eventId]
+    )
+  ).map((p) => p.user_id);
+
   // Only owner or admin can update
   if (event.owner_id !== requesterId && !hasMinimumRole(requesterRole, 'admin')) {
     throw new ForbiddenError('Only the event owner or admin can modify this event');
@@ -620,6 +629,7 @@ export async function updateEvent(
   }
 
   syncEventToGCalAsync(eventId, event.owner_id);
+  await invalidateEvent(eventId, beforeParticipantIds);
   return getEventById(eventId, requesterId);
 }
 
@@ -650,6 +660,7 @@ export async function moveEvent(
   );
 
   syncEventToGCalAsync(eventId, event.owner_id);
+  await invalidateEvent(eventId);
   return getEventById(eventId, requesterId);
 }
 
@@ -678,6 +689,8 @@ export async function deleteEvent(
 
   // Remove from Google Calendar if synced
   deleteEventFromGCalAsync(event.owner_id, event.gcalendar_event_id);
+
+  await invalidateEvent(eventId);
 }
 
 // ── STATUS ──
@@ -719,6 +732,7 @@ export async function changeEventStatus(
     }
   }
 
+  await invalidateEvent(eventId);
   return getEventById(eventId, requesterId);
 }
 
@@ -849,6 +863,7 @@ export async function convertEvent(
     ]
   );
 
+  await invalidateEvent(eventId);
   return getEventById(eventId, requesterId);
 }
 
@@ -882,6 +897,7 @@ export async function addParticipant(
     [eventId, targetUserId, role]
   );
 
+  await invalidateEvent(eventId);
   return getEventById(eventId, requesterId);
 }
 
@@ -911,6 +927,7 @@ export async function removeParticipant(
     [eventId, targetUserId]
   );
 
+  await invalidateEvent(eventId, [targetUserId]);
   return getEventById(eventId, requesterId);
 }
 
@@ -993,5 +1010,6 @@ export async function deleteOccurrence(
       `UPDATE events SET recurrence_exceptions = $1, updated_at = NOW() WHERE id = $2`,
       [JSON.stringify(exceptions), eventId]
     );
+    await invalidateEvent(eventId);
   }
 }
