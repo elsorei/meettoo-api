@@ -1,5 +1,7 @@
 import { queryMany } from '../../shared/db';
+import { getRedis } from '../../config/redis';
 import { RRule } from 'rrule';
+import type { RedisClientType } from 'redis';
 
 /**
  * Motore di disponibilità a bitmap ("scolapasta").
@@ -134,8 +136,8 @@ function expandRecurrence(ev: RawEvent, fromDate: string, toDate: string): strin
 
 // ── costruzione dal database ──
 
-/** Bitmap dei liberi per più utenti, con una sola query. */
-export async function buildFreeBitmaps(
+/** Bitmap dei liberi per più utenti leggendo direttamente dal database. */
+async function buildFreeBitmapsFromDb(
   userIds: string[],
   fromDate: string,
   toDate: string
@@ -165,6 +167,131 @@ export async function buildFreeBitmaps(
     result.set(uid, eventsToFreeBitmap(byUser.get(uid)!, fromDate, toDate));
   }
   return result;
+}
+
+// ── cache Redis ──
+//
+// Per ogni utente teniamo in Redis la bitmap dei liberi su un orizzonte fisso
+// di HORIZON_DAYS giorni a partire da oggi (chiave avail:{userId}:{oggi}).
+// Una richiesta su un sotto-intervallo affetta la bitmap dell'orizzonte: ogni
+// giorno occupa 12 byte esatti, quindi il taglio è allineato ai byte.
+// La cache degrada con grazia: se Redis non risponde si calcola dal database.
+
+const HORIZON_DAYS = 90;
+const BYTES_PER_DAY = SLOTS_PER_DAY / 8; // 12
+const CACHE_TTL_S = 36 * 3600;
+
+function todayUTC(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function addDays(date: string, n: number): string {
+  const d = parseDate(date);
+  d.setUTCDate(d.getUTCDate() + n);
+  return dateToStr(d);
+}
+
+async function safeGetRedis(): Promise<RedisClientType | null> {
+  try {
+    return await getRedis();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Bitmap dei liberi per più utenti su [fromDate, toDate]. Stessa firma di
+ * sempre: la cache Redis è "infilata dietro" senza cambiare l'interfaccia.
+ */
+export async function buildFreeBitmaps(
+  userIds: string[],
+  fromDate: string,
+  toDate: string
+): Promise<Map<string, Buffer>> {
+  if (userIds.length === 0) return new Map();
+
+  const anchor = todayUTC();
+  const horizonEnd = addDays(anchor, HORIZON_DAYS - 1);
+
+  // Intervallo fuori dall'orizzonte della cache: calcolo diretto dal database.
+  if (fromDate < anchor || toDate > horizonEnd) {
+    return buildFreeBitmapsFromDb(userIds, fromDate, toDate);
+  }
+
+  const redis = await safeGetRedis();
+  const horizons = new Map<string, Buffer>();
+  const missed: string[] = [];
+
+  if (redis) {
+    for (const uid of userIds) {
+      let buf: Buffer | null = null;
+      try {
+        const cached = await redis.get(`avail:${uid}:${anchor}`);
+        if (cached) buf = Buffer.from(cached, 'base64');
+      } catch {
+        buf = null;
+      }
+      if (buf) horizons.set(uid, buf);
+      else missed.push(uid);
+    }
+  } else {
+    missed.push(...userIds);
+  }
+
+  if (missed.length > 0) {
+    const computed = await buildFreeBitmapsFromDb(missed, anchor, horizonEnd);
+    for (const uid of missed) {
+      const buf = computed.get(uid)!;
+      horizons.set(uid, buf);
+      if (redis) {
+        try {
+          await redis.set(`avail:${uid}:${anchor}`, buf.toString('base64'), { EX: CACHE_TTL_S });
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+  }
+
+  // Taglia ogni orizzonte sul sotto-intervallo richiesto (taglio ai byte).
+  const startByte = dayOffset(anchor, fromDate) * BYTES_PER_DAY;
+  const endByte = (dayOffset(anchor, toDate) + 1) * BYTES_PER_DAY;
+  const result = new Map<string, Buffer>();
+  for (const uid of userIds) {
+    result.set(uid, Buffer.from(horizons.get(uid)!.subarray(startByte, endByte)));
+  }
+  return result;
+}
+
+/** Invalida la cache disponibilità di una lista di utenti. Best effort. */
+export async function invalidateUsers(userIds: string[]): Promise<void> {
+  if (userIds.length === 0) return;
+  try {
+    const redis = await safeGetRedis();
+    if (!redis) return;
+    const anchor = todayUTC();
+    await Promise.all(userIds.map((uid) => redis.del(`avail:${uid}:${anchor}`)));
+  } catch {
+    /* best effort */
+  }
+}
+
+/**
+ * Invalida la cache di tutti i partecipanti di un evento, più eventuali utenti
+ * extra (es. un partecipante appena rimosso). Best effort: non solleva errori.
+ */
+export async function invalidateEvent(eventId: string, extraUserIds: string[] = []): Promise<void> {
+  try {
+    const rows = await queryMany<{ user_id: string }>(
+      `SELECT user_id FROM event_participants WHERE event_id = $1`,
+      [eventId]
+    );
+    const ids = new Set<string>(extraUserIds);
+    for (const r of rows) ids.add(r.user_id);
+    await invalidateUsers([...ids]);
+  } catch {
+    /* best effort */
+  }
 }
 
 // ── operazioni sulle bitmap ──
