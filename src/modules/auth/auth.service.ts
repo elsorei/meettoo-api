@@ -8,35 +8,94 @@ import { Role } from '../../core/auth/roles';
 interface UserRow {
   id: string;
   username: string;
+  email: string | null;
+  name: string | null;
+  phone: string | null;
+  photo_url: string | null;
   password_hash: string;
   password_version: number;
   role: Role;
   is_active: boolean;
 }
 
+interface SessionUser {
+  id: string;
+  email: string | null;
+  name: string | null;
+  phone: string | null;
+  photoUrl: string | null;
+}
+
 interface LoginResult {
   accessToken: string;
   refreshToken: string;
-  user: {
-    id: string;
-    username: string;
-    role: Role;
-    profile: any;
-  };
+  user: SessionUser;
 }
 
-export async function login(username: string, password: string): Promise<LoginResult> {
+const SELECT_USER =
+  'id, username, email, name, phone, photo_url, password_hash, password_version, role, is_active';
+
+function toSessionUser(row: UserRow): SessionUser {
+  return { id: row.id, email: row.email, name: row.name, phone: row.phone, photoUrl: row.photo_url };
+}
+
+async function issueTokens(
+  userId: string,
+  role: Role
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const payload: TokenPayload = { userId, role };
+  const accessToken = signAccessToken(payload);
+  const refreshToken = signRefreshToken(payload);
+  // Store refresh token in Redis (for invalidation on logout)
+  const redis = await getRedis();
+  await redis.set(`refresh:${userId}`, refreshToken, { EX: 30 * 24 * 3600 });
+  return { accessToken, refreshToken };
+}
+
+/** Registrazione consumer: crea l'account con email + password e apre la sessione. */
+export async function register(
+  email: string,
+  password: string,
+  name: string
+): Promise<LoginResult> {
+  const normEmail = email.trim().toLowerCase();
+
+  const existing = await queryOne<{ id: string }>(
+    'SELECT id FROM users WHERE LOWER(email) = $1',
+    [normEmail]
+  );
+  if (existing) {
+    throw new BadRequestError('Email già registrata');
+  }
+
+  const passwordHash = await hashPassword(password);
   const user = await queryOne<UserRow>(
-    'SELECT id, username, password_hash, password_version, role, is_active FROM users WHERE username = $1',
-    [username.toLowerCase().trim()]
+    `INSERT INTO users (username, email, name, password_hash, password_version, role, is_active)
+     VALUES ($1, $1, $2, $3, 2, 'operator', true)
+     RETURNING ${SELECT_USER}`,
+    [normEmail, name.trim(), passwordHash]
+  );
+  if (!user) {
+    throw new BadRequestError('Registrazione non riuscita');
+  }
+
+  const tokens = await issueTokens(user.id, user.role);
+  return { ...tokens, user: toSessionUser(user) };
+}
+
+/** Accesso consumer tramite email + password. */
+export async function login(email: string, password: string): Promise<LoginResult> {
+  const user = await queryOne<UserRow>(
+    `SELECT ${SELECT_USER} FROM users WHERE LOWER(email) = $1`,
+    [email.trim().toLowerCase()]
   );
 
   if (!user) {
-    throw new UnauthorizedError('Invalid credentials');
+    throw new UnauthorizedError('Credenziali non valide');
   }
 
   if (!user.is_active) {
-    throw new UnauthorizedError('Account is disabled');
+    throw new UnauthorizedError('Account disattivato');
   }
 
   const { valid, needsUpgrade } = await verifyPassword(
@@ -46,10 +105,10 @@ export async function login(username: string, password: string): Promise<LoginRe
   );
 
   if (!valid) {
-    throw new UnauthorizedError('Invalid credentials');
+    throw new UnauthorizedError('Credenziali non valide');
   }
 
-  // Upgrade legacy SHA256 to bcrypt transparently
+  // Upgrade legacy SHA256 hash to bcrypt transparently
   if (needsUpgrade) {
     const newHash = await hashPassword(password);
     await query(
@@ -58,30 +117,10 @@ export async function login(username: string, password: string): Promise<LoginRe
     );
   }
 
-  // Update last_login
   await query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
 
-  const payload: TokenPayload = { userId: user.id, role: user.role };
-  const accessToken = signAccessToken(payload);
-  const refreshToken = signRefreshToken(payload);
-
-  // Store refresh token in Redis (for invalidation on logout)
-  const redis = await getRedis();
-  await redis.set(`refresh:${user.id}`, refreshToken, { EX: 30 * 24 * 3600 });
-
-  // Fetch profile data based on role
-  const profile = await getProfile(user.id, user.role);
-
-  return {
-    accessToken,
-    refreshToken,
-    user: {
-      id: user.id,
-      username: user.username,
-      role: user.role,
-      profile,
-    },
-  };
+  const tokens = await issueTokens(user.id, user.role);
+  return { ...tokens, user: toSessionUser(user) };
 }
 
 export async function refreshTokens(token: string): Promise<{ accessToken: string; refreshToken: string }> {
@@ -143,33 +182,14 @@ export async function changePassword(
   );
 }
 
-export async function getProfile(userId: string, role: Role): Promise<any> {
-  if (role === 'client') {
-    return queryOne(
-      `SELECT c.id, c.legacy_code, c.business_name, c.fiscal_code, c.vat_number,
-              c.primary_email, c.modules, c.metadata
-       FROM clients c WHERE c.user_id = $1`,
-      [userId]
-    );
-  }
-  // operator, admin, owner
-  return queryOne(
-    `SELECT o.id, o.email, o.first_name, o.last_name, o.department,
-            o.is_admin, o.is_owner, o.photo
-     FROM operators o WHERE o.user_id = $1`,
+/** Profilo dell'utente autenticato. */
+export async function getMe(userId: string): Promise<SessionUser> {
+  const user = await queryOne<UserRow>(
+    `SELECT ${SELECT_USER} FROM users WHERE id = $1`,
     [userId]
   );
-}
-
-export async function getMe(userId: string): Promise<any> {
-  const user = await queryOne<{ id: string; username: string; role: Role }>(
-    'SELECT id, username, role FROM users WHERE id = $1',
-    [userId]
-  );
-  if (!user) throw new NotFoundError('User not found');
-
-  const profile = await getProfile(userId, user.role);
-  return { ...user, profile };
+  if (!user) throw new NotFoundError('Utente non trovato');
+  return toSessionUser(user);
 }
 
 export async function updateFcmToken(userId: string, fcmToken: string): Promise<void> {

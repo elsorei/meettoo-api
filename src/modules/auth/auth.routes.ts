@@ -4,6 +4,7 @@ import * as ctrl from './auth.controller';
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   // Public routes
+  app.post('/api/auth/register', ctrl.registerHandler);
   app.post('/api/auth/login', ctrl.loginHandler);
   app.post('/api/auth/refresh', ctrl.refreshHandler);
 

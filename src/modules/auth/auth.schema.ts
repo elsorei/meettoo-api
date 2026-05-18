@@ -1,8 +1,14 @@
 import { z } from 'zod';
 
 export const loginSchema = z.object({
-  username: z.string().min(1, 'Username is required').trim(),
-  password: z.string().min(1, 'Password is required'),
+  email: z.string().trim().email('Email non valida'),
+  password: z.string().min(1, 'Password obbligatoria'),
+});
+
+export const registerSchema = z.object({
+  email: z.string().trim().email('Email non valida'),
+  password: z.string().min(8, 'La password deve avere almeno 8 caratteri'),
+  name: z.string().trim().min(1, 'Il nome è obbligatorio'),
 });
 
 export const refreshSchema = z.object({
@@ -37,6 +43,7 @@ export const dashboardPreferencesSchema = z.object({
 });
 
 export type LoginInput = z.infer<typeof loginSchema>;
+export type RegisterInput = z.infer<typeof registerSchema>;
 export type RefreshInput = z.infer<typeof refreshSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
 export type DashboardPreferencesInput = z.infer<typeof dashboardPreferencesSchema>;
