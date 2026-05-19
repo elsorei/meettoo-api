@@ -622,13 +622,18 @@ export async function updateEvent(
       }
     }
 
-    // Add new participants not yet in the table
+    // Add new participants; update the role of existing non-organizer participants
     for (const p of input.participants) {
       if (!existingIds.has(p.userId)) {
         await query(
           `INSERT INTO event_participants (event_id, user_id, role, confirmation)
            VALUES ($1, $2, $3, 'pending')
            ON CONFLICT (event_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
+          [eventId, p.userId, p.role]
+        );
+      } else if (!organizerIds.has(p.userId)) {
+        await query(
+          `UPDATE event_participants SET role = $3 WHERE event_id = $1 AND user_id = $2`,
           [eventId, p.userId, p.role]
         );
       }

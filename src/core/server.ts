@@ -38,6 +38,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       const ok = allowedOrigins.some(o => typeof o === 'string' ? o === origin : o.test(origin));
       cb(ok ? null : new Error('CORS not allowed'), ok);
     },
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
     credentials: true,
   });
 
