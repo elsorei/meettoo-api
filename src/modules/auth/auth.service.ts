@@ -4,6 +4,7 @@ import { signAccessToken, signRefreshToken, verifyRefreshToken, TokenPayload } f
 import { getRedis } from '../../config/redis';
 import { UnauthorizedError, NotFoundError, BadRequestError } from '../../core/errors';
 import { Role } from '../../core/auth/roles';
+import { normalizePhone } from '../../core/phone';
 
 interface UserRow {
   id: string;
@@ -56,7 +57,8 @@ async function issueTokens(
 export async function register(
   email: string,
   password: string,
-  name: string
+  name: string,
+  phone?: string
 ): Promise<LoginResult> {
   const normEmail = email.trim().toLowerCase();
 
@@ -68,12 +70,21 @@ export async function register(
     throw new BadRequestError('Email già registrata');
   }
 
+  // Telefono opzionale: se fornito, va normalizzato in E.164 o rifiutato.
+  let normPhone: string | null = null;
+  if (phone !== undefined) {
+    normPhone = normalizePhone(phone);
+    if (!normPhone) {
+      throw new BadRequestError('Numero di telefono non valido');
+    }
+  }
+
   const passwordHash = await hashPassword(password);
   const user = await queryOne<UserRow>(
-    `INSERT INTO users (username, email, name, password_hash, password_version, role, is_active)
-     VALUES ($1, $1, $2, $3, 2, 'operator', true)
+    `INSERT INTO users (username, email, name, phone, password_hash, password_version, role, is_active)
+     VALUES ($1, $1, $2, $3, $4, 2, 'operator', true)
      RETURNING ${SELECT_USER}`,
-    [normEmail, name.trim(), passwordHash]
+    [normEmail, name.trim(), normPhone, passwordHash]
   );
   if (!user) {
     throw new BadRequestError('Registrazione non riuscita');
@@ -187,6 +198,48 @@ export async function getMe(userId: string): Promise<SessionUser> {
   const user = await queryOne<UserRow>(
     `SELECT ${SELECT_USER} FROM users WHERE id = $1`,
     [userId]
+  );
+  if (!user) throw new NotFoundError('Utente non trovato');
+  return toSessionUser(user);
+}
+
+/**
+ * Aggiorna nome e/o telefono dell'utente autenticato.
+ * Il telefono viene normalizzato in E.164; restituisce il profilo aggiornato
+ * nella stessa forma di getMe().
+ */
+export async function updateProfile(
+  userId: string,
+  fields: { name?: string; phone?: string }
+): Promise<SessionUser> {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+
+  if (fields.name !== undefined) {
+    params.push(fields.name.trim());
+    sets.push(`name = $${params.length}`);
+  }
+
+  if (fields.phone !== undefined) {
+    const normPhone = normalizePhone(fields.phone);
+    if (!normPhone) {
+      throw new BadRequestError('Numero di telefono non valido');
+    }
+    params.push(normPhone);
+    sets.push(`phone = $${params.length}`);
+  }
+
+  // Nessun campo da aggiornare: restituisci il profilo corrente.
+  if (sets.length === 0) {
+    return getMe(userId);
+  }
+
+  params.push(userId);
+  const user = await queryOne<UserRow>(
+    `UPDATE users SET ${sets.join(', ')}, updated_at = NOW()
+     WHERE id = $${params.length}
+     RETURNING ${SELECT_USER}`,
+    params
   );
   if (!user) throw new NotFoundError('Utente non trovato');
   return toSessionUser(user);

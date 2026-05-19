@@ -1,6 +1,6 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import * as authService from './auth.service';
-import { loginSchema, registerSchema, refreshSchema, changePasswordSchema, dashboardPreferencesSchema } from './auth.schema';
+import { loginSchema, registerSchema, refreshSchema, changePasswordSchema, updateProfileSchema, dashboardPreferencesSchema } from './auth.schema';
 import { ValidationError } from '../../core/errors';
 import { AuthRequest } from '../../shared/types';
 
@@ -23,7 +23,8 @@ export async function registerHandler(request: FastifyRequest, reply: FastifyRep
   const result = await authService.register(
     parsed.data.email,
     parsed.data.password,
-    parsed.data.name
+    parsed.data.name,
+    parsed.data.phone
   );
   return reply.status(201).send({ success: true, data: result });
 }
@@ -47,6 +48,17 @@ export async function logoutHandler(request: FastifyRequest, reply: FastifyReply
 export async function getMeHandler(request: FastifyRequest, reply: FastifyReply) {
   const req = request as AuthRequest;
   const me = await authService.getMe(req.user.userId);
+  return reply.status(200).send({ success: true, data: me });
+}
+
+export async function updateMeHandler(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const parsed = updateProfileSchema.safeParse(request.body);
+  if (!parsed.success) {
+    throw new ValidationError('Validation failed', parsed.error.flatten());
+  }
+
+  const me = await authService.updateProfile(req.user.userId, parsed.data);
   return reply.status(200).send({ success: true, data: me });
 }
 

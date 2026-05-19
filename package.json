@@ -26,6 +26,7 @@
     "googleapis": "^171.4.0",
     "imapflow": "^1.2.18",
     "jsonwebtoken": "^9.0.3",
+    "libphonenumber-js": "^1.13.2",
     "mailparser": "^3.9.6",
     "mysql2": "^3.20.0",
     "nodemailer": "^8.0.4",

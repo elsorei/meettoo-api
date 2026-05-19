@@ -11,6 +11,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // Protected routes
   app.post('/api/auth/logout', { preHandler: [authenticate] }, ctrl.logoutHandler);
   app.get('/api/auth/me', { preHandler: [authenticate] }, ctrl.getMeHandler);
+  app.put('/api/auth/me', { preHandler: [authenticate] }, ctrl.updateMeHandler);
   app.put('/api/auth/change-password', { preHandler: [authenticate] }, ctrl.changePasswordHandler);
   app.put('/api/auth/fcm-token', { preHandler: [authenticate] }, ctrl.updateFcmTokenHandler);
   app.get('/api/auth/preferences', { preHandler: [authenticate] }, ctrl.getDashboardPreferencesHandler);

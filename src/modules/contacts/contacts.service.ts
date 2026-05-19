@@ -1,5 +1,6 @@
 import { queryOne, queryMany, query } from '../../shared/db';
 import { NotFoundError, BadRequestError } from '../../core/errors';
+import { normalizePhone } from '../../core/phone';
 
 // Campi pubblici di un utente, come compaiono nella rubrica.
 const USER_FIELDS = `u.id, u.name, u.username, u.email, u.phone, u.photo_url`;
@@ -173,16 +174,23 @@ export async function searchUsers(userId: string, q: string): Promise<any[]> {
 }
 
 // ── Confronto con la rubrica del telefono ──
+// I numeri della rubrica vengono normalizzati in E.164 (default region IT) e
+// confrontati con users.phone, anch'esso salvato in E.164. I numeri non
+// interpretabili vengono scartati.
 export async function matchPhones(userId: string, phones: string[]): Promise<any[]> {
   const normalized = Array.from(
-    new Set(phones.map((p) => p.replace(/\D/g, '')).filter((p) => p.length >= 5))
+    new Set(
+      phones
+        .map((p) => normalizePhone(p))
+        .filter((p): p is string => p !== null)
+    )
   );
   if (normalized.length === 0) return [];
   return queryMany(
     `SELECT ${USER_FIELDS}, ${relationshipSql('u.id')} AS relationship
      FROM users u
      WHERE u.id <> $1 AND u.is_active = true AND u.phone IS NOT NULL
-       AND regexp_replace(u.phone, '\\D', '', 'g') = ANY($2::text[])
+       AND u.phone = ANY($2::text[])
      ORDER BY COALESCE(u.name, u.username)`,
     [userId, normalized]
   );
