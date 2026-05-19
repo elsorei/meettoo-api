@@ -6,7 +6,7 @@ import { buildServer } from './core/server';
 import { getPool, closePool } from './config/database';
 import { closeRedis } from './config/redis';
 import { initSocketIO, closeSocketIO } from './core/websocket/socket';
-import { initFirebase } from './core/notifications/push';
+import { initPush } from './core/notifications/push';
 import { startReminderScheduler } from './core/notifications/reminder-scheduler';
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
@@ -71,8 +71,8 @@ async function main() {
     initSocketIO(httpServer);
     app.log.info('WebSocket (Socket.io) server ready');
 
-    // Initialize Firebase for push notifications
-    initFirebase();
+    // Inizializza le notifiche push (servizio di Expo)
+    initPush();
 
     // Start the reminder scheduler (checks due reminders every minute)
     startReminderScheduler();
