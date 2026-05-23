@@ -115,6 +115,18 @@ export const addParticipantSchema = z.object({
   role: z.enum(['organizer', 'participant', 'reserve']).default('participant'),
 });
 
+// ── Attachments ──
+// Param schema per endpoint che operano su un evento (event-level).
+export const attachmentEventParamSchema = z.object({
+  id: z.string().uuid(),
+});
+
+// Param schema per endpoint che operano su un singolo allegato (download/delete).
+export const attachmentParamsSchema = z.object({
+  id: z.string().uuid(),
+  attId: z.string().uuid(),
+});
+
 // ── Types ──
 export type CreateEventInput = z.infer<typeof createEventSchema>;
 export type UpdateEventInput = z.infer<typeof updateEventSchema>;

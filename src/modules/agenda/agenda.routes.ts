@@ -32,6 +32,12 @@ export async function agendaRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/events/:id/participants', auth, ctrl.addParticipant);
   app.delete('/api/events/:id/participants/:userId', auth, ctrl.removeParticipant);
 
+  // ── Attachments ──
+  app.post('/api/events/:id/attachments', auth, ctrl.uploadAttachments);
+  app.get('/api/events/:id/attachments', auth, ctrl.listAttachments);
+  app.get('/api/events/:id/attachments/:attId/download', auth, ctrl.downloadAttachment);
+  app.delete('/api/events/:id/attachments/:attId', auth, ctrl.deleteAttachment);
+
   // ── Calendar permissions (operators only) ──
   app.get('/api/calendar/permissions', staffOnly, ctrl.getCalendarPermissions);
   app.post('/api/calendar/permissions', staffOnly, ctrl.grantCalendarPermission);

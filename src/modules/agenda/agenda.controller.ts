@@ -1,4 +1,5 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
+import { createReadStream } from 'fs';
 import * as agendaService from './agenda.service';
 import * as availabilityService from './availability.service';
 import * as commonAvail from './common-availability.service';
@@ -6,8 +7,9 @@ import {
   createEventSchema, updateEventSchema, changeStatusSchema,
   confirmParticipationSchema, convertEventSchema, moveEventSchema,
   listEventsQuerySchema, availabilityQuerySchema, addParticipantSchema,
+  attachmentEventParamSchema, attachmentParamsSchema,
 } from './agenda.schema';
-import { ValidationError } from '../../core/errors';
+import { BadRequestError, ValidationError } from '../../core/errors';
 import { AuthRequest } from '../../shared/types';
 import { paginate } from '../../shared/pagination';
 
@@ -229,4 +231,60 @@ export async function findCommonSlot(request: FastifyRequest, reply: FastifyRepl
   const durationMin = parseInt(duration) || 60;
   const slot = await commonAvail.findCommonSlot(ids, fromDate, durationMin);
   return reply.send({ success: true, data: slot });
+}
+
+// ── ATTACHMENTS ──
+
+export async function uploadAttachments(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const parsed = attachmentEventParamSchema.safeParse(request.params);
+  if (!parsed.success) throw new ValidationError('Invalid event id', parsed.error.flatten());
+
+  if (!request.isMultipart()) {
+    throw new BadRequestError('Request must be multipart/form-data');
+  }
+
+  const parts = request.parts();
+  const attachments = await agendaService.uploadAttachments(parsed.data.id, req.user.userId, parts);
+  return reply.status(201).send({ success: true, data: { attachments } });
+}
+
+export async function listAttachments(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const parsed = attachmentEventParamSchema.safeParse(request.params);
+  if (!parsed.success) throw new ValidationError('Invalid event id', parsed.error.flatten());
+
+  const attachments = await agendaService.listAttachments(parsed.data.id, req.user.userId);
+  return reply.send({ success: true, data: { attachments } });
+}
+
+export async function downloadAttachment(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const parsed = attachmentParamsSchema.safeParse(request.params);
+  if (!parsed.success) throw new ValidationError('Invalid params', parsed.error.flatten());
+
+  const info = await agendaService.getAttachmentForDownload(
+    parsed.data.id, parsed.data.attId, req.user.userId
+  );
+
+  // Codifica RFC 5987 per filename con caratteri non-ASCII (es. accenti).
+  const asciiFallback = info.fileName.replace(/[^\x20-\x7E]/g, '_');
+  const encoded = encodeURIComponent(info.fileName);
+
+  return reply
+    .header(
+      'Content-Disposition',
+      `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`
+    )
+    .type(info.mimeType)
+    .send(createReadStream(info.absolutePath));
+}
+
+export async function deleteAttachment(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const parsed = attachmentParamsSchema.safeParse(request.params);
+  if (!parsed.success) throw new ValidationError('Invalid params', parsed.error.flatten());
+
+  await agendaService.deleteAttachment(parsed.data.id, parsed.data.attId, req.user.userId, req.user.role);
+  return reply.send({ success: true, data: { deleted: true } });
 }

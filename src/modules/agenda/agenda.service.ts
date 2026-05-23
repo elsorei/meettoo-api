@@ -8,6 +8,8 @@ import { syncEventToGCalAsync, deleteEventFromGCalAsync } from './gcalendar.hook
 import { triggerNewEvent } from '../../core/notifications/triggers';
 import { getEffectiveLevel } from '../sharing/sharing.service';
 import { invalidateEvent } from './availability-engine';
+import { saveUploadedFile, deleteUploadedFile, getAbsolutePath } from '../../shared/file-upload';
+import { existsSync } from 'fs';
 
 // ── Types ──
 
@@ -990,6 +992,237 @@ export async function revokeCalendarPermission(
     `DELETE FROM calendar_permissions WHERE owner_operator_id = $1 AND viewer_operator_id = $2`,
     [owner.id, viewer.id]
   );
+}
+
+// ── ATTACHMENTS ──
+
+// MIME types accettati: foto da fotocamera/galleria (jpeg/png/heic/heif/webp)
+// e documenti PDF. Office/Excel sono esclusi: meettoo è consumer, non CRM.
+const ACCEPTED_ATTACHMENT_MIMES = new Set<string>([
+  'image/jpeg',
+  'image/png',
+  'image/heic',
+  'image/heif',
+  'image/webp',
+  'application/pdf',
+]);
+
+export interface EventAttachment {
+  id: string;
+  event_id: string;
+  file_name: string;
+  file_size: number | null;
+  mime_type: string | null;
+  uploaded_by: string | null;
+  uploaded_by_name: string | null;
+  created_at: string;
+}
+
+interface AttachmentDbRow {
+  id: string;
+  event_id: string;
+  file_name: string;
+  file_path: string;
+  file_size: number | null;
+  mime_type: string | null;
+  uploaded_by: string | null;
+  created_at: string;
+}
+
+/**
+ * Verifica che l'utente possa accedere agli allegati dell'evento.
+ * Riusa la logica di getEventById (owner/partecipante/creator/admin/operator
+ * per eventi non privati). Solleva ForbiddenError / NotFoundError.
+ */
+async function assertEventAccess(eventId: string, userId: string): Promise<void> {
+  await getEventById(eventId, userId);
+}
+
+/**
+ * Carica uno o più allegati per un evento. Il chiamante deve essere
+ * owner o partecipante (vedi assertEventAccess).
+ *
+ * Filtra i MIME non consentiti restituendo 400. Se nessun file passa la
+ * validazione, la lista risultante è vuota ma la chiamata non fallisce
+ * a meno che almeno un file abbia un MIME rifiutato (in quel caso 400).
+ */
+export async function uploadAttachments(
+  eventId: string,
+  userId: string,
+  parts: AsyncIterableIterator<any>
+): Promise<EventAttachment[]> {
+  await assertEventAccess(eventId, userId);
+
+  const saved: AttachmentDbRow[] = [];
+  // Tieni traccia dei file salvati a disco per poterli rimuovere se la
+  // transazione DB fallisce o se un file successivo ha un MIME non valido.
+  const savedPaths: string[] = [];
+
+  try {
+    for await (const part of parts) {
+      if (part.type !== 'file') continue;
+
+      const mime = (part.mimetype || '').toLowerCase();
+      if (!ACCEPTED_ATTACHMENT_MIMES.has(mime)) {
+        // Drena lo stream per evitare leak prima di sollevare l'errore.
+        part.file.resume();
+        throw new BadRequestError(
+          `Unsupported file type: ${mime || 'unknown'}. Allowed: images (jpeg/png/heic/heif/webp) and PDF.`
+        );
+      }
+
+      const uploaded = await saveUploadedFile(part, `events/${eventId}`);
+      savedPaths.push(uploaded.filePath);
+
+      const inserted = await queryOne<AttachmentDbRow>(
+        `INSERT INTO event_attachments
+           (event_id, file_name, file_path, file_size, mime_type, uploaded_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, event_id, file_name, file_path, file_size, mime_type, uploaded_by, created_at`,
+        [eventId, uploaded.originalName, uploaded.filePath, uploaded.size, uploaded.mimeType, userId]
+      );
+
+      if (inserted) saved.push(inserted);
+    }
+  } catch (err) {
+    // Best-effort cleanup dei file scritti su disco se qualcosa esplode.
+    for (const p of savedPaths) {
+      deleteUploadedFile(p);
+    }
+    throw err;
+  }
+
+  if (saved.length === 0) {
+    throw new BadRequestError('No files were uploaded');
+  }
+
+  // Arricchisci con uploaded_by_name in una singola query
+  return enrichAttachments(saved);
+}
+
+/**
+ * Lista gli allegati di un evento (più recenti prima). NON espone file_path.
+ */
+export async function listAttachments(
+  eventId: string,
+  userId: string
+): Promise<EventAttachment[]> {
+  await assertEventAccess(eventId, userId);
+
+  const rows = await queryMany<AttachmentDbRow>(
+    `SELECT id, event_id, file_name, file_path, file_size, mime_type, uploaded_by, created_at
+     FROM event_attachments
+     WHERE event_id = $1
+     ORDER BY created_at DESC`,
+    [eventId]
+  );
+
+  return enrichAttachments(rows);
+}
+
+/**
+ * Restituisce i metadati e il path filesystem di un allegato pronto per
+ * essere streamato come download. Il controller userà filePath con
+ * getAbsolutePath() per costruire il ReadStream.
+ */
+export async function getAttachmentForDownload(
+  eventId: string,
+  attachmentId: string,
+  userId: string
+): Promise<{ filePath: string; fileName: string; mimeType: string; absolutePath: string }> {
+  await assertEventAccess(eventId, userId);
+
+  const row = await queryOne<AttachmentDbRow>(
+    `SELECT id, event_id, file_name, file_path, file_size, mime_type, uploaded_by, created_at
+     FROM event_attachments
+     WHERE id = $1`,
+    [attachmentId]
+  );
+  if (!row) throw new NotFoundError('Attachment not found');
+  // Difesa in profondità: l'attachment deve appartenere all'evento del path.
+  if (row.event_id !== eventId) throw new NotFoundError('Attachment not found');
+
+  const absolutePath = getAbsolutePath(row.file_path);
+  if (!existsSync(absolutePath)) {
+    throw new NotFoundError('Attachment file is missing on the server');
+  }
+
+  return {
+    filePath: row.file_path,
+    fileName: row.file_name,
+    mimeType: row.mime_type || 'application/octet-stream',
+    absolutePath,
+  };
+}
+
+/**
+ * Cancella un allegato. Autorizzato: owner dell'evento OR chi ha caricato
+ * l'allegato (uploaded_by === userId). Admin/owner del sistema passano via
+ * hasMinimumRole. Rimuove la riga DB e il file dal filesystem.
+ */
+export async function deleteAttachment(
+  eventId: string,
+  attachmentId: string,
+  userId: string,
+  userRole: Role
+): Promise<void> {
+  const attachment = await queryOne<AttachmentDbRow>(
+    `SELECT id, event_id, file_name, file_path, file_size, mime_type, uploaded_by, created_at
+     FROM event_attachments
+     WHERE id = $1`,
+    [attachmentId]
+  );
+  if (!attachment) throw new NotFoundError('Attachment not found');
+  if (attachment.event_id !== eventId) throw new NotFoundError('Attachment not found');
+
+  const event = await queryOne<{ owner_id: string }>(
+    `SELECT owner_id FROM events WHERE id = $1`,
+    [eventId]
+  );
+  if (!event) throw new NotFoundError('Event not found');
+
+  const isOwner = event.owner_id === userId;
+  const isUploader = attachment.uploaded_by === userId;
+  const isAdmin = hasMinimumRole(userRole, 'admin');
+
+  if (!isOwner && !isUploader && !isAdmin) {
+    throw new ForbiddenError('Only the event owner or the uploader can delete this attachment');
+  }
+
+  await query(`DELETE FROM event_attachments WHERE id = $1`, [attachmentId]);
+  deleteUploadedFile(attachment.file_path);
+}
+
+/**
+ * Lookup dei nomi degli uploader in batch. Restituisce gli allegati nel
+ * formato pubblico (senza file_path).
+ */
+async function enrichAttachments(rows: AttachmentDbRow[]): Promise<EventAttachment[]> {
+  if (rows.length === 0) return [];
+
+  const uploaderIds = Array.from(
+    new Set(rows.map((r) => r.uploaded_by).filter((id): id is string => !!id))
+  );
+
+  const users = uploaderIds.length > 0
+    ? await queryMany<{ id: string; display_name: string }>(
+        `SELECT id, COALESCE(name, username) as display_name
+         FROM users WHERE id = ANY($1)`,
+        [uploaderIds]
+      )
+    : [];
+  const nameById = new Map(users.map((u) => [u.id, u.display_name]));
+
+  return rows.map((r) => ({
+    id: r.id,
+    event_id: r.event_id,
+    file_name: r.file_name,
+    file_size: r.file_size,
+    mime_type: r.mime_type,
+    uploaded_by: r.uploaded_by,
+    uploaded_by_name: r.uploaded_by ? nameById.get(r.uploaded_by) ?? null : null,
+    created_at: r.created_at,
+  }));
 }
 
 // ── DELETE SINGLE OCCURRENCE ──
