@@ -6,6 +6,14 @@ export const eventStatusEnum = z.enum(['pending', 'confirmed', 'cancelled', 'sus
 export const confirmationEnum = z.enum(['pending', 'accepted', 'declined']);
 
 // ── Create event ──
+// linkedDeadline: opzionale. Se presente, dopo aver creato l'evento principale
+// viene generata una scadenza correlata (commitment) datata `offsetDays` giorni
+// prima, sull'agenda dello stesso owner, senza partecipanti né blocco orario.
+export const linkedDeadlineSchema = z.object({
+  offsetDays: z.number().int().min(0).max(365),
+  title: z.string().min(1).max(500).optional(),
+});
+
 export const createEventSchema = z.object({
   type: eventTypeEnum,
   title: z.string().min(1, 'Title is required').max(500),
@@ -25,6 +33,7 @@ export const createEventSchema = z.object({
   forOperatorUserId: z.string().uuid().optional(), // crea evento sull'agenda di un altro operatore
   isPrivate: z.boolean().optional().default(false), // 🔒 evento privato: solo owner/partecipanti/admin lo vedono
   alarmMinutesBefore: z.number().int().min(0).max(10080).optional(), // promemoria: minuti prima dell'inizio
+  linkedDeadline: linkedDeadlineSchema.nullable().optional(), // crea scadenza correlata
 }).refine((data) => {
   if (data.type !== 'reminder') {
     return !!data.startTime && !!data.endTime;

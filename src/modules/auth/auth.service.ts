@@ -5,6 +5,8 @@ import { getRedis } from '../../config/redis';
 import { UnauthorizedError, NotFoundError, BadRequestError } from '../../core/errors';
 import { Role } from '../../core/auth/roles';
 import { normalizePhone } from '../../core/phone';
+import { saveUploadedFile, deleteUploadedFile, getAbsolutePath } from '../../shared/file-upload';
+import { existsSync, unlinkSync } from 'fs';
 
 interface UserRow {
   id: string;
@@ -262,4 +264,145 @@ export async function updateDashboardPreferences(userId: string, prefs: any): Pr
     [JSON.stringify(prefs), userId]
   );
   return result?.dashboard_preferences || {};
+}
+
+// ── PHOTO PROFILO ──
+
+// MIME types accettati per la foto profilo: stessa whitelist degli allegati
+// "immagine" (no PDF qui — è solo un avatar).
+const ACCEPTED_PHOTO_MIMES = new Set<string>([
+  'image/jpeg',
+  'image/png',
+  'image/heic',
+  'image/heif',
+  'image/webp',
+]);
+
+// Limite locale per la foto profilo: 5MB. Il limite globale di @fastify/multipart
+// è più alto (50MB), quindi controlliamo qui esplicitamente.
+const PHOTO_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Carica/sostituisce la foto profilo dell'utente.
+ * - Valida MIME (jpeg/png/heic/heif/webp) e size (<= 5MB) prima di salvare a DB.
+ * - Salva sotto users/<userId>/.
+ * - Best-effort: cancella il file precedente dopo l'update del DB.
+ * Ritorna il nuovo photo_url (path relativo all'UPLOAD_DIR).
+ */
+export async function updateUserPhoto(
+  userId: string,
+  file: any // MultipartFile da @fastify/multipart (request.file())
+): Promise<{ photoUrl: string }> {
+  if (!file) {
+    throw new BadRequestError('No file provided');
+  }
+
+  const mime = (file.mimetype || '').toLowerCase();
+  if (!ACCEPTED_PHOTO_MIMES.has(mime)) {
+    // Drena lo stream prima di sollevare per evitare leak.
+    try { file.file.resume(); } catch { /* ignore */ }
+    throw new BadRequestError(
+      `Unsupported photo type: ${mime || 'unknown'}. Allowed: jpeg, png, heic, heif, webp.`
+    );
+  }
+
+  const uploaded = await saveUploadedFile(file, `users/${userId}`);
+
+  // Controllo size locale (5MB). saveUploadedFile fa il check contro MAX_FILE_SIZE
+  // globale (50MB); qui vogliamo un limite più stretto per gli avatar.
+  if (uploaded.size > PHOTO_MAX_BYTES) {
+    // Rimuovi il file appena salvato.
+    try {
+      if (existsSync(uploaded.fullPath)) unlinkSync(uploaded.fullPath);
+    } catch { /* ignore */ }
+    throw new BadRequestError(
+      `Photo too large. Max size: ${PHOTO_MAX_BYTES / 1024 / 1024}MB`
+    );
+  }
+
+  // Aggiorna users.photo_url e leggi il path precedente per cancellarlo.
+  const updated = await queryOne<{ old_photo_url: string | null; new_photo_url: string }>(
+    `WITH prev AS (
+       SELECT photo_url AS old_photo_url FROM users WHERE id = $2
+     )
+     UPDATE users
+        SET photo_url = $1, updated_at = NOW()
+       FROM prev
+      WHERE users.id = $2
+      RETURNING prev.old_photo_url, users.photo_url AS new_photo_url`,
+    [uploaded.filePath, userId]
+  );
+
+  if (!updated) {
+    // Rollback: cancella il file appena salvato.
+    deleteUploadedFile(uploaded.filePath);
+    throw new NotFoundError('Utente non trovato');
+  }
+
+  // Best-effort: cancella il file precedente (se diverso e presente).
+  if (updated.old_photo_url && updated.old_photo_url !== uploaded.filePath) {
+    deleteUploadedFile(updated.old_photo_url);
+  }
+
+  return { photoUrl: updated.new_photo_url };
+}
+
+/**
+ * Cancella la foto profilo dell'utente.
+ * Imposta photo_url = NULL e rimuove il file dal disco (best-effort).
+ */
+export async function deleteUserPhoto(userId: string): Promise<void> {
+  // Pattern WITH prev: cattura il valore precedente prima dell'UPDATE.
+  const updated = await queryOne<{ old_photo_url: string | null }>(
+    `WITH prev AS (
+       SELECT photo_url AS old_photo_url FROM users WHERE id = $1
+     )
+     UPDATE users
+        SET photo_url = NULL, updated_at = NOW()
+       FROM prev
+      WHERE users.id = $1
+      RETURNING prev.old_photo_url`,
+    [userId]
+  );
+
+  if (!updated) {
+    throw new NotFoundError('Utente non trovato');
+  }
+
+  if (updated.old_photo_url) {
+    deleteUploadedFile(updated.old_photo_url);
+  }
+}
+
+/**
+ * Restituisce il path assoluto della foto profilo, se presente.
+ * Usato dall'endpoint pubblico GET /api/auth/me/photo/file/:userId
+ * per servire l'avatar come stream. Ritorna null se non c'è foto o
+ * il file è mancante a disco.
+ */
+export async function getUserPhotoFile(
+  userId: string
+): Promise<{ absolutePath: string; mimeType: string } | null> {
+  const row = await queryOne<{ photo_url: string | null }>(
+    'SELECT photo_url FROM users WHERE id = $1 AND is_active = true',
+    [userId]
+  );
+  if (!row || !row.photo_url) return null;
+
+  const absolutePath = getAbsolutePath(row.photo_url);
+  if (!existsSync(absolutePath)) return null;
+
+  // MIME by extension — semplice e sufficiente per la whitelist nota.
+  const ext = row.photo_url.slice(row.photo_url.lastIndexOf('.') + 1).toLowerCase();
+  const mimeByExt: Record<string, string> = {
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    heic: 'image/heic',
+    heif: 'image/heif',
+    webp: 'image/webp',
+  };
+  const mimeType = mimeByExt[ext] || 'application/octet-stream';
+
+  return { absolutePath, mimeType };
 }

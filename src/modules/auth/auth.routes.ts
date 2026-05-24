@@ -16,4 +16,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.put('/api/auth/fcm-token', { preHandler: [authenticate] }, ctrl.updateFcmTokenHandler);
   app.get('/api/auth/preferences', { preHandler: [authenticate] }, ctrl.getDashboardPreferencesHandler);
   app.put('/api/auth/preferences', { preHandler: [authenticate] }, ctrl.updateDashboardPreferencesHandler);
+
+  // Foto profilo: upload/delete autenticati; serving pubblico (avatar nei contatti).
+  app.post('/api/auth/me/photo', { preHandler: [authenticate] }, ctrl.uploadMePhotoHandler);
+  app.delete('/api/auth/me/photo', { preHandler: [authenticate] }, ctrl.deleteMePhotoHandler);
+  app.get('/api/auth/me/photo/file/:userId', ctrl.getUserPhotoFileHandler);
 }

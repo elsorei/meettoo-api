@@ -72,7 +72,7 @@ export async function createEvent(
   const ownerId = input.forOperatorUserId || requesterId;
   const createdById = input.forOperatorUserId ? requesterId : null;
 
-  const eventId = await transaction(async (client: PoolClient) => {
+  const { eventId, linkedDeadlineId } = await transaction(async (client: PoolClient) => {
     // Insert event (con created_by_id se assegnato da un altro operatore)
     const eventResult = await client.query(
       `INSERT INTO events (type, title, description, event_date, start_time, end_time,
@@ -121,7 +121,47 @@ export async function createEvent(
       }
     }
 
-    return newId as string;
+    // ── Scadenza correlata (linkedDeadline) ──
+    // Crea un secondo evento di tipo 'commitment' senza orario, datato
+    // `offsetDays` giorni prima dell'evento principale. Solo l'owner come
+    // organizer, niente altri partecipanti. linked_event_id punta al primo.
+    let linkedId: string | null = null;
+    if (input.linkedDeadline) {
+      const deadlineTitle =
+        input.linkedDeadline.title?.trim() || `Scadenza: ${input.title}`;
+      // Calcolo data: sottrai offsetDays. Usiamo SQL per evitare drift di
+      // timezone lato JS (event_date è DATE, non TIMESTAMPTZ).
+      const linkedResult = await client.query(
+        `INSERT INTO events (type, title, description, event_date, start_time, end_time,
+                             has_alarm, owner_id, metadata, created_by_id, is_private,
+                             linked_event_id)
+         VALUES ('commitment', $1, NULL,
+                 ($2::date - ($3::int))::date,
+                 NULL, NULL,
+                 false, $4, '{}'::jsonb, $5, $6, $7)
+         RETURNING id`,
+        [
+          deadlineTitle,
+          input.eventDate,
+          input.linkedDeadline.offsetDays,
+          ownerId,
+          createdById,
+          input.isPrivate === true,
+          newId,
+        ]
+      );
+      linkedId = linkedResult.rows[0].id as string;
+
+      // Owner organizer anche sulla scadenza, per coerenza con il pattern
+      // (la getCalendarEvents filtra owner_id OR partecipante).
+      await client.query(
+        `INSERT INTO event_participants (event_id, user_id, role, confirmation, confirmed_at)
+         VALUES ($1, $2, 'organizer', 'accepted', NOW())`,
+        [linkedId, ownerId]
+      );
+    }
+
+    return { eventId: newId as string, linkedDeadlineId: linkedId };
   });
 
   // Async sync to Google Calendar (non-blocking)
@@ -138,13 +178,19 @@ export async function createEvent(
   }
 
   await invalidateEvent(eventId);
-  return getEventById(eventId, ownerId);
+  if (linkedDeadlineId) await invalidateEvent(linkedDeadlineId);
+
+  const eventDetail = await getEventById(eventId, ownerId);
+  return {
+    ...eventDetail,
+    linked_deadline: linkedDeadlineId ? { id: linkedDeadlineId } : null,
+  };
 }
 
 // ── READ ──
 
 export async function getEventById(eventId: string, requesterId: string): Promise<any> {
-  const event = await queryOne<EventRow & { owner_name: string; owner_photo: string | null; created_by_name: string | null; created_by_photo: string | null }>(
+  const event = await queryOne<EventRow & { owner_name: string; owner_photo: string | null; created_by_name: string | null; created_by_photo: string | null; linked_event_id: string | null }>(
     `SELECT e.*, e.event_date::text as event_date,
             COALESCE(u.name, u.username) as owner_name,
             u.photo_url as owner_photo,
@@ -215,10 +261,22 @@ export async function getEventById(eventId: string, requesterId: string): Promis
     [eventId]
   );
 
+  // Carica l'evento linkato (se presente). Permette al client di mostrare
+  // "Scadenza correlata a: ...". Niente ricorsione: solo il primo livello.
+  let linkedEvent: { id: string; title: string; type: string; event_date: string } | null = null;
+  if (event.linked_event_id) {
+    linkedEvent = await queryOne<{ id: string; title: string; type: string; event_date: string }>(
+      `SELECT id, title, type, event_date::text as event_date
+       FROM events WHERE id = $1`,
+      [event.linked_event_id]
+    );
+  }
+
   return {
     ...event,
     participants,
     attachments,
+    linked_event: linkedEvent,
   };
 }
 

@@ -1,7 +1,8 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
+import { createReadStream } from 'fs';
 import * as authService from './auth.service';
 import { loginSchema, registerSchema, refreshSchema, changePasswordSchema, updateProfileSchema, dashboardPreferencesSchema } from './auth.schema';
-import { ValidationError } from '../../core/errors';
+import { BadRequestError, NotFoundError, ValidationError } from '../../core/errors';
 import { AuthRequest } from '../../shared/types';
 
 export async function loginHandler(request: FastifyRequest, reply: FastifyReply) {
@@ -107,4 +108,48 @@ export async function updateDashboardPreferencesHandler(request: FastifyRequest,
 
   const prefs = await authService.updateDashboardPreferences(targetUserId, parsed.data);
   return reply.send({ success: true, data: prefs });
+}
+
+// ── PHOTO PROFILO ──
+
+export async function uploadMePhotoHandler(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+
+  if (!request.isMultipart()) {
+    throw new BadRequestError('Request must be multipart/form-data');
+  }
+
+  // L'endpoint accetta un solo file con field name "photo".
+  const file = await (request as any).file();
+  if (!file) {
+    throw new BadRequestError('Missing "photo" file');
+  }
+
+  const result = await authService.updateUserPhoto(req.user.userId, file);
+  return reply.send({ success: true, data: { photoUrl: result.photoUrl } });
+}
+
+export async function deleteMePhotoHandler(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  await authService.deleteUserPhoto(req.user.userId);
+  return reply.send({ success: true, data: { deleted: true } });
+}
+
+/**
+ * Serve la foto profilo dell'utente come stream (no auth: l'avatar è
+ * pubblico, va mostrato come immagine nei contatti).
+ * 404 se l'utente non ha foto o il file è mancante.
+ */
+export async function getUserPhotoFileHandler(request: FastifyRequest, reply: FastifyReply) {
+  const { userId } = request.params as { userId: string };
+  if (!userId) throw new BadRequestError('userId is required');
+
+  const info = await authService.getUserPhotoFile(userId);
+  if (!info) {
+    throw new NotFoundError('Photo not found');
+  }
+
+  return reply
+    .type(info.mimeType)
+    .send(createReadStream(info.absolutePath));
 }
