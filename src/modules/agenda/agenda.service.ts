@@ -59,6 +59,77 @@ interface AttachmentRow {
   created_at: string;
 }
 
+// ── Sprint 3.5.1: visibility + external links ──
+
+interface ExternalLinkRow {
+  id: string;
+  event_id: string;
+  url: string;
+  title: string | null;
+  image_url: string | null;
+  source: string;
+  position: number;
+  created_at: string;
+}
+
+// Visibilità che espongono l'evento al feed pubblico. Qualunque mutation
+// che sposti l'evento in uno di questi stati richiede un account "maturo"
+// (vedi assertCanPublishPublic). MVP: 1 ora.
+const PUBLIC_VISIBILITIES = new Set(['public_view', 'public_open']);
+const PUBLIC_PUBLISH_MIN_ACCOUNT_AGE_MS = 60 * 60 * 1000; // 1h (MVP — più avanti 30gg)
+
+async function assertCanPublishPublic(
+  userId: string,
+  visibility: string | undefined
+): Promise<void> {
+  if (!visibility || !PUBLIC_VISIBILITIES.has(visibility)) return;
+
+  const row = await queryOne<{ created_at: string }>(
+    `SELECT created_at FROM users WHERE id = $1`,
+    [userId]
+  );
+  if (!row) throw new ForbiddenError('User not found');
+
+  const createdAt = new Date(row.created_at).getTime();
+  if (Number.isNaN(createdAt) || Date.now() - createdAt < PUBLIC_PUBLISH_MIN_ACCOUNT_AGE_MS) {
+    throw new ForbiddenError(
+      "La pubblicazione al feed pubblico richiede un account più maturo. Prova invitati o amici."
+    );
+  }
+}
+
+async function insertExternalLinks(
+  client: PoolClient,
+  eventId: string,
+  links: Array<{ url: string; title?: string; imageUrl?: string; source?: string; position: number }>
+): Promise<void> {
+  for (const link of links) {
+    await client.query(
+      `INSERT INTO event_external_links
+         (event_id, url, title, image_url, source, position)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        eventId,
+        link.url,
+        link.title ?? null,
+        link.imageUrl ?? null,
+        link.source ?? 'web',
+        link.position,
+      ]
+    );
+  }
+}
+
+async function fetchExternalLinks(eventId: string): Promise<ExternalLinkRow[]> {
+  return queryMany<ExternalLinkRow>(
+    `SELECT id, event_id, url, title, image_url, source, position, created_at
+     FROM event_external_links
+     WHERE event_id = $1
+     ORDER BY position ASC, created_at ASC`,
+    [eventId]
+  );
+}
+
 // ── CREATE ──
 
 export async function createEvent(
@@ -72,13 +143,20 @@ export async function createEvent(
   const ownerId = input.forOperatorUserId || requesterId;
   const createdById = input.forOperatorUserId ? requesterId : null;
 
+  // Guardia anti-abuso sul feed pubblico: account troppo giovane non può
+  // pubblicare in 'public_view'/'public_open' (vedi assertCanPublishPublic).
+  await assertCanPublishPublic(ownerId, input.visibility);
+
   const { eventId, linkedDeadlineId } = await transaction(async (client: PoolClient) => {
-    // Insert event (con created_by_id se assegnato da un altro operatore)
+    // Insert event (con created_by_id se assegnato da un altro operatore).
+    // Sprint 3.5.1: scrive anche visibility e cover_attachment_id.
     const eventResult = await client.query(
       `INSERT INTO events (type, title, description, event_date, start_time, end_time,
                            has_alarm, alarm_datetime, alarm_minutes_before, confirmation_deadline,
-                           owner_id, metadata, recurrence_rule, created_by_id, is_private)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                           owner_id, metadata, recurrence_rule, created_by_id, is_private,
+                           visibility, cover_attachment_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+               COALESCE($16::event_visibility, 'invitees'::event_visibility), $17)
        RETURNING id`,
       [
         input.type,
@@ -96,10 +174,17 @@ export async function createEvent(
         input.recurrenceRule || null,
         createdById,
         input.isPrivate === true,
+        input.visibility ?? null,
+        input.coverAttachmentId ?? null,
       ]
     );
 
     const newId = eventResult.rows[0].id;
+
+    // Link esterni: insert in batch nella stessa transazione.
+    if (input.externalLinks && input.externalLinks.length > 0) {
+      await insertExternalLinks(client, newId, input.externalLinks);
+    }
 
     // Add owner as organizer participant
     await client.query(
@@ -190,7 +275,15 @@ export async function createEvent(
 // ── READ ──
 
 export async function getEventById(eventId: string, requesterId: string): Promise<any> {
-  const event = await queryOne<EventRow & { owner_name: string; owner_photo: string | null; created_by_name: string | null; created_by_photo: string | null; linked_event_id: string | null }>(
+  const event = await queryOne<EventRow & {
+    owner_name: string;
+    owner_photo: string | null;
+    created_by_name: string | null;
+    created_by_photo: string | null;
+    linked_event_id: string | null;
+    visibility: string;
+    cover_attachment_id: string | null;
+  }>(
     `SELECT e.*, e.event_date::text as event_date,
             COALESCE(u.name, u.username) as owner_name,
             u.photo_url as owner_photo,
@@ -220,8 +313,12 @@ export async function getEventById(eventId: string, requesterId: string): Promis
   const isCreator = (event as any).created_by_id === requesterId;
   const isOwner   = event.owner_id === requesterId;
   const isAdmin   = hasMinimumRole(requester?.role || 'client', 'admin');
+  // Sprint 3.5.1: eventi pubblici (public_view/public_open) sono leggibili
+  // da chiunque autenticato — il check di accesso si rilassa, ma le
+  // mutations restano riservate all'owner (vedi updateEvent/deleteEvent).
+  const isPubliclyReadable = PUBLIC_VISIBILITIES.has(event.visibility);
 
-  if (!isParticipant && !isOwner && !isCreator && !isAdmin) {
+  if (!isParticipant && !isOwner && !isCreator && !isAdmin && !isPubliclyReadable) {
     // Operatori possono vedere le agende dei colleghi senza permessi espliciti
     if (requester?.role !== 'operator') {
       throw new ForbiddenError('You do not have access to this event');
@@ -233,7 +330,9 @@ export async function getEventById(eventId: string, requesterId: string): Promis
   // non può aprire reminders altrui o eventi marcati is_private — anche se
   // tecnicamente avrebbe accesso "in chiaro" via permesso white/write.
   // Owner/partecipante/creator/admin continuano a vedere tutto.
-  if (!isParticipant && !isOwner && !isCreator && !isAdmin) {
+  // Eccezione Sprint 3.5.1: per eventi public_view/public_open il filtro
+  // privacy/reminder non scatta (non sono privati per definizione).
+  if (!isParticipant && !isOwner && !isCreator && !isAdmin && !isPubliclyReadable) {
     const isPrivateEvent = (event as any).is_private === true;
     const isReminder     = event.type === 'reminder';
     if (isPrivateEvent || isReminder) {
@@ -272,11 +371,15 @@ export async function getEventById(eventId: string, requesterId: string): Promis
     );
   }
 
+  // Sprint 3.5.1: link esterni dell'evento (post-style).
+  const externalLinks = await fetchExternalLinks(eventId);
+
   return {
     ...event,
     participants,
     attachments,
     linked_event: linkedEvent,
+    external_links: externalLinks,
   };
 }
 
@@ -622,6 +725,11 @@ export async function updateEvent(
     throw new ForbiddenError('Only the event owner or admin can modify this event');
   }
 
+  // Sprint 3.5.1: stessa guardia di createEvent quando si tenta di
+  // pubblicare al feed pubblico. L'owner è sempre `event.owner_id` (non
+  // requesterId, perché un admin potrebbe modificare per conto di altri).
+  await assertCanPublishPublic(event.owner_id, input.visibility);
+
   const sets: string[] = [];
   const params: any[] = [];
   let idx = 1;
@@ -646,20 +754,36 @@ export async function updateEvent(
   if (input.recurrenceRule !== undefined) addSet('recurrence_rule', input.recurrenceRule || null);
   if (input.isPrivate !== undefined) addSet('is_private', input.isPrivate);
   if (input.alarmMinutesBefore !== undefined) addSet('alarm_minutes_before', input.alarmMinutesBefore);
+  // Sprint 3.5.1: visibility + cover. `visibility` è ENUM, cast esplicito.
+  if (input.visibility !== undefined) {
+    sets.push(`visibility = $${idx}::event_visibility`);
+    params.push(input.visibility);
+    idx++;
+  }
+  if (input.coverAttachmentId !== undefined) addSet('cover_attachment_id', input.coverAttachmentId);
 
   // Riarma il promemoria se cambiano orario o anticipo.
   if (input.eventDate !== undefined || input.startTime !== undefined || input.alarmMinutesBefore !== undefined) {
     sets.push(`alarm_sent_at = NULL`);
   }
 
-  if (sets.length === 0) throw new BadRequestError('No fields to update');
+  // Sprint 3.5.1: aggiornamenti che toccano solo participants o
+  // externalLinks sono validi anche se `sets` è vuoto.
+  const hasOnlyRelations =
+    sets.length === 0 &&
+    (input.participants !== undefined || input.externalLinks !== undefined);
 
-  sets.push(`updated_at = NOW()`);
+  if (sets.length === 0 && !hasOnlyRelations) {
+    throw new BadRequestError('No fields to update');
+  }
 
-  await query(
-    `UPDATE events SET ${sets.join(', ')} WHERE id = $${idx}`,
-    [...params, eventId]
-  );
+  if (sets.length > 0) {
+    sets.push(`updated_at = NOW()`);
+    await query(
+      `UPDATE events SET ${sets.join(', ')} WHERE id = $${idx}`,
+      [...params, eventId]
+    );
+  }
 
   // ── Sync participants if provided ──
   if (input.participants !== undefined) {
@@ -698,6 +822,21 @@ export async function updateEvent(
         );
       }
     }
+  }
+
+  // ── Sprint 3.5.1: REPLACE dei link esterni (delete + insert) ──
+  // Se l'array è passato, sostituisce interamente il set; se omesso,
+  // i link esistenti restano intatti. Atomicità via transaction.
+  if (input.externalLinks !== undefined) {
+    await transaction(async (client: PoolClient) => {
+      await client.query(
+        `DELETE FROM event_external_links WHERE event_id = $1`,
+        [eventId]
+      );
+      if (input.externalLinks && input.externalLinks.length > 0) {
+        await insertExternalLinks(client, eventId, input.externalLinks);
+      }
+    });
   }
 
   syncEventToGCalAsync(eventId, event.owner_id);

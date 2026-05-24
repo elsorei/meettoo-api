@@ -1,9 +1,31 @@
 import { z } from 'zod';
 
 // ── Event types ──
-export const eventTypeEnum = z.enum(['appointment', 'commitment', 'reminder']);
+// 'gathering' è il 4° tipo introdotto in Sprint 3.5.1: evento "post-style"
+// pensato per il feed pubblico e per la visibilità a scaglioni.
+export const eventTypeEnum = z.enum(['appointment', 'commitment', 'reminder', 'gathering']);
 export const eventStatusEnum = z.enum(['pending', 'confirmed', 'cancelled', 'suspended', 'completed']);
 export const confirmationEnum = z.enum(['pending', 'accepted', 'declined']);
+
+// ── Visibility & external links ──
+// I cinque scaglioni di visibilità (Sprint 3.5.1).
+export const eventVisibilitySchema = z.enum([
+  'private',
+  'invitees',
+  'friends',
+  'public_view',
+  'public_open',
+]);
+
+// Link esterno (IG/TikTok/FB/web). Niente oEmbed nativo: i metadati
+// li compila chi crea l'evento o si arricchiscono lato client.
+export const externalLinkInputSchema = z.object({
+  url: z.string().url(),
+  title: z.string().max(500).optional(),
+  imageUrl: z.string().url().optional(),
+  source: z.string().max(20).optional(),
+  position: z.number().int().min(0).default(0),
+});
 
 // ── Create event ──
 // linkedDeadline: opzionale. Se presente, dopo aver creato l'evento principale
@@ -34,8 +56,14 @@ export const createEventSchema = z.object({
   isPrivate: z.boolean().optional().default(false), // 🔒 evento privato: solo owner/partecipanti/admin lo vedono
   alarmMinutesBefore: z.number().int().min(0).max(10080).optional(), // promemoria: minuti prima dell'inizio
   linkedDeadline: linkedDeadlineSchema.nullable().optional(), // crea scadenza correlata
+  // ── Sprint 3.5.1: visibilità a scaglioni + cover + link esterni ──
+  visibility: eventVisibilitySchema.optional(),
+  coverAttachmentId: z.string().uuid().nullable().optional(),
+  externalLinks: z.array(externalLinkInputSchema).max(10).optional(),
 }).refine((data) => {
-  if (data.type !== 'reminder') {
+  // 'gathering' è "post-style": può avere orario o no, non forziamo
+  // startTime/endTime. 'appointment' e 'commitment' restano timeboxed.
+  if (data.type === 'appointment' || data.type === 'commitment') {
     return !!data.startTime && !!data.endTime;
   }
   return true;
@@ -65,6 +93,11 @@ export const updateEventSchema = z.object({
   recurrenceRule: z.string().max(500).optional().nullable(),
   isPrivate: z.boolean().optional(), // 🔒 toggle privacy per evento
   alarmMinutesBefore: z.number().int().min(0).max(10080).optional().nullable(), // promemoria: minuti prima
+  // ── Sprint 3.5.1: visibilità a scaglioni + cover + link esterni ──
+  visibility: eventVisibilitySchema.optional(),
+  coverAttachmentId: z.string().uuid().nullable().optional(),
+  // Se passato, il set viene SOSTITUITO (delete + insert). Se omesso, intatto.
+  externalLinks: z.array(externalLinkInputSchema).max(10).optional(),
 });
 
 // ── Change status ──
@@ -83,7 +116,8 @@ export const convertEventSchema = z.object({
   startTime: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/).optional(),
   endTime: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/).optional(),
 }).refine((data) => {
-  if (data.newType !== 'reminder') {
+  // Solo appointment/commitment richiedono timebox. reminder e gathering no.
+  if (data.newType === 'appointment' || data.newType === 'commitment') {
     return !!data.startTime && !!data.endTime;
   }
   return true;
