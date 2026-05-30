@@ -19,6 +19,7 @@ interface UserRow {
   password_version: number;
   role: Role;
   is_active: boolean;
+  timezone: string;
 }
 
 interface SessionUser {
@@ -27,6 +28,7 @@ interface SessionUser {
   name: string | null;
   phone: string | null;
   photoUrl: string | null;
+  timezone: string;
 }
 
 interface LoginResult {
@@ -36,10 +38,17 @@ interface LoginResult {
 }
 
 const SELECT_USER =
-  'id, username, email, name, phone, photo_url, password_hash, password_version, role, is_active';
+  'id, username, email, name, phone, photo_url, password_hash, password_version, role, is_active, timezone';
 
 function toSessionUser(row: UserRow): SessionUser {
-  return { id: row.id, email: row.email, name: row.name, phone: row.phone, photoUrl: row.photo_url };
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    phone: row.phone,
+    photoUrl: row.photo_url,
+    timezone: row.timezone,
+  };
 }
 
 async function issueTokens(
@@ -249,6 +258,22 @@ export async function updateProfile(
 
 export async function updateFcmToken(userId: string, fcmToken: string): Promise<void> {
   await query('UPDATE users SET fcm_token = $1, updated_at = NOW() WHERE id = $2', [fcmToken, userId]);
+}
+
+/**
+ * Aggiorna la timezone IANA dell'utente autenticato.
+ * La validazione di lunghezza è in zod; qui non facciamo check IANA stretto
+ * (il client manda solo timezone che `Intl.DateTimeFormat()` riconosce).
+ */
+export async function updateTimezone(userId: string, timezone: string): Promise<SessionUser> {
+  const user = await queryOne<UserRow>(
+    `UPDATE users SET timezone = $1, updated_at = NOW()
+     WHERE id = $2
+     RETURNING ${SELECT_USER}`,
+    [timezone, userId]
+  );
+  if (!user) throw new NotFoundError('Utente non trovato');
+  return toSessionUser(user);
 }
 
 export async function getDashboardPreferences(userId: string): Promise<any> {

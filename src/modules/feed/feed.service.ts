@@ -16,6 +16,11 @@ export interface PublicFeedItem {
   visibility: 'public_view' | 'public_open';
   attachments_count: number;
   external_links_count: number;
+  // 042: geolocalizzazione (nome posto + coordinate + timezone evento).
+  location_name: string | null;
+  location_lat: string | null;
+  location_lng: string | null;
+  timezone: string;
 }
 
 interface FeedRow {
@@ -31,6 +36,11 @@ interface FeedRow {
   visibility: 'public_view' | 'public_open';
   attachments_count: string;
   external_links_count: string;
+  // 042: NUMERIC -> string via node-postgres (no precision loss).
+  location_name: string | null;
+  location_lat: string | null;
+  location_lng: string | null;
+  timezone: string;
 }
 
 // L'endpoint download allegati richiede auth ed espone il file via
@@ -88,6 +98,10 @@ export async function listPublicFeed(filters: ListPublicFeedQuery): Promise<Publ
         e.owner_id,
         COALESCE(u.name, u.username) AS owner_name,
         e.visibility::text       AS visibility,
+        e.location_name,
+        e.location_lat,
+        e.location_lng,
+        e.timezone,
         (SELECT COUNT(*) FROM event_attachments      WHERE event_id = e.id) AS attachments_count,
         (SELECT COUNT(*) FROM event_external_links   WHERE event_id = e.id) AS external_links_count
       FROM events e
@@ -111,5 +125,9 @@ export async function listPublicFeed(filters: ListPublicFeedQuery): Promise<Publ
     visibility: r.visibility,
     attachments_count: parseInt(r.attachments_count, 10) || 0,
     external_links_count: parseInt(r.external_links_count, 10) || 0,
+    location_name: r.location_name,
+    location_lat: r.location_lat,
+    location_lng: r.location_lng,
+    timezone: r.timezone,
   }));
 }

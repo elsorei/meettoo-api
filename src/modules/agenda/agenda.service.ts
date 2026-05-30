@@ -35,6 +35,11 @@ interface EventRow {
   recurrence_exceptions: string[];
   created_at: string;
   updated_at: string;
+  // 042: geolocalizzazione (location + timezone evento).
+  location_name: string | null;
+  location_lat: string | null;
+  location_lng: string | null;
+  timezone: string;
 }
 
 interface ParticipantRow {
@@ -147,16 +152,33 @@ export async function createEvent(
   // pubblicare in 'public_view'/'public_open' (vedi assertCanPublishPublic).
   await assertCanPublishPublic(ownerId, input.visibility);
 
+  // 042: se il client non passa una timezone per l'evento, eredita quella
+  // dell'utente owner (così un utente con tz='Europe/Paris' crea eventi
+  // con quella tz senza doverla rispecificare).
+  let eventTimezone: string | undefined = input.timezone;
+  if (eventTimezone === undefined) {
+    const ownerRow = await queryOne<{ timezone: string }>(
+      `SELECT timezone FROM users WHERE id = $1`,
+      [ownerId]
+    );
+    eventTimezone = ownerRow?.timezone;
+  }
+
   const { eventId, linkedDeadlineId } = await transaction(async (client: PoolClient) => {
     // Insert event (con created_by_id se assegnato da un altro operatore).
     // Sprint 3.5.1: scrive anche visibility e cover_attachment_id.
+    // 042: scrive anche location_name/lat/lng + timezone (con cast NUMERIC
+    // su lat/lng perché zod manda number ma la colonna è NUMERIC).
     const eventResult = await client.query(
       `INSERT INTO events (type, title, description, event_date, start_time, end_time,
                            has_alarm, alarm_datetime, alarm_minutes_before, confirmation_deadline,
                            owner_id, metadata, recurrence_rule, created_by_id, is_private,
-                           visibility, cover_attachment_id)
+                           visibility, cover_attachment_id,
+                           location_name, location_lat, location_lng, timezone)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-               COALESCE($16::event_visibility, 'invitees'::event_visibility), $17)
+               COALESCE($16::event_visibility, 'invitees'::event_visibility), $17,
+               $18, $19::numeric, $20::numeric,
+               COALESCE($21, 'Europe/Rome'))
        RETURNING id`,
       [
         input.type,
@@ -176,6 +198,10 @@ export async function createEvent(
         input.isPrivate === true,
         input.visibility ?? null,
         input.coverAttachmentId ?? null,
+        input.locationName ?? null,
+        input.locationLat ?? null,
+        input.locationLng ?? null,
+        eventTimezone ?? null,
       ]
     );
 
@@ -465,6 +491,7 @@ export async function listEvents(
             e.start_time::text, e.end_time::text, e.status,
             e.has_alarm, e.alarm_datetime, e.closed,
             e.owner_id, e.created_at, e.updated_at,
+            e.location_name, e.location_lat, e.location_lng, e.timezone,
             COALESCE(owner_u.name, owner_u.username) as owner_name,
             (SELECT COUNT(*) FROM event_participants WHERE event_id = e.id) as participant_count,
             (SELECT COUNT(*) FROM event_attachments WHERE event_id = e.id) as attachment_count,
@@ -520,6 +547,7 @@ export async function getCalendarEvents(
             e.event_date::text, e.start_time::text, e.end_time::text,
             e.status, e.has_alarm, e.alarm_datetime, e.closed, e.owner_id,
             e.recurrence_rule, e.recurrence_exceptions, e.is_private,
+            e.location_name, e.location_lat, e.location_lng, e.timezone,
             (e.owner_id = $3) as is_mine
      FROM events e
      WHERE e.id IN (
@@ -682,6 +710,11 @@ export async function getCalendarEvents(
         isRecurring: !!e.recurrence_rule,
         occurrenceDate: e._occurrence ? e.event_date : undefined,
         realEventId,
+        // 042: location + timezone — snake_case coerente con i DTO del modulo.
+        location_name: e.location_name ?? null,
+        location_lat: e.location_lat ?? null,
+        location_lng: e.location_lng ?? null,
+        timezone: e.timezone,
         confirmSummary: {
           total: parts.filter((p: any) => p.role !== 'organizer').length,
           accepted: parts.filter((p: any) => p.role !== 'organizer' && p.confirmation === 'accepted').length,
@@ -761,6 +794,21 @@ export async function updateEvent(
     idx++;
   }
   if (input.coverAttachmentId !== undefined) addSet('cover_attachment_id', input.coverAttachmentId);
+
+  // 042: location + timezone evento. lat/lng cast esplicito a NUMERIC
+  // (zod manda number ma la colonna è NUMERIC(10,7)).
+  if (input.locationName !== undefined) addSet('location_name', input.locationName);
+  if (input.locationLat !== undefined) {
+    sets.push(`location_lat = $${idx}::numeric`);
+    params.push(input.locationLat);
+    idx++;
+  }
+  if (input.locationLng !== undefined) {
+    sets.push(`location_lng = $${idx}::numeric`);
+    params.push(input.locationLng);
+    idx++;
+  }
+  if (input.timezone !== undefined) addSet('timezone', input.timezone);
 
   // Riarma il promemoria se cambiano orario o anticipo.
   if (input.eventDate !== undefined || input.startTime !== undefined || input.alarmMinutesBefore !== undefined) {

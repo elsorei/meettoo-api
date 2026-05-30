@@ -6,6 +6,7 @@ import { buildServer } from './core/server';
 import { getPool, closePool } from './config/database';
 import { closeRedis } from './config/redis';
 import { initSocketIO, closeSocketIO } from './core/websocket/socket';
+import { initVideoSocket } from './modules/video/video.socket';
 import { initPush } from './core/notifications/push';
 import { startReminderScheduler } from './core/notifications/reminder-scheduler';
 import { readFileSync, readdirSync } from 'fs';
@@ -68,7 +69,8 @@ async function main() {
 
     // Initialize Socket.io on the underlying HTTP server
     const httpServer = app.server;
-    initSocketIO(httpServer);
+    const io = initSocketIO(httpServer);
+    initVideoSocket(io);
     app.log.info('WebSocket (Socket.io) server ready');
 
     // Inizializza le notifiche push (servizio di Expo)

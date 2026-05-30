@@ -1,7 +1,7 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { createReadStream } from 'fs';
 import * as authService from './auth.service';
-import { loginSchema, registerSchema, refreshSchema, changePasswordSchema, updateProfileSchema, dashboardPreferencesSchema } from './auth.schema';
+import { loginSchema, registerSchema, refreshSchema, changePasswordSchema, updateProfileSchema, dashboardPreferencesSchema, updateTimezoneSchema } from './auth.schema';
 import { BadRequestError, NotFoundError, ValidationError } from '../../core/errors';
 import { AuthRequest } from '../../shared/types';
 
@@ -87,6 +87,17 @@ export async function updateFcmTokenHandler(request: FastifyRequest, reply: Fast
 
   await authService.updateFcmToken(req.user.userId, fcmToken);
   return reply.status(200).send({ success: true, message: 'FCM token updated' });
+}
+
+export async function updateTimezoneHandler(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const parsed = updateTimezoneSchema.safeParse(request.body);
+  if (!parsed.success) {
+    throw new ValidationError('Validation failed', parsed.error.flatten());
+  }
+
+  const me = await authService.updateTimezone(req.user.userId, parsed.data.timezone);
+  return reply.status(200).send({ success: true, data: me });
 }
 
 export async function getDashboardPreferencesHandler(request: FastifyRequest, reply: FastifyReply) {

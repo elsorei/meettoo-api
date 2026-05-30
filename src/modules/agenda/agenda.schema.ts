@@ -60,6 +60,11 @@ export const createEventSchema = z.object({
   visibility: eventVisibilitySchema.optional(),
   coverAttachmentId: z.string().uuid().nullable().optional(),
   externalLinks: z.array(externalLinkInputSchema).max(10).optional(),
+  // ── Geolocalizzazione (042): luogo testuale + coordinate + timezone evento ──
+  locationName: z.string().min(1).max(255).optional(),
+  locationLat: z.number().min(-90).max(90).optional(),
+  locationLng: z.number().min(-180).max(180).optional(),
+  timezone: z.string().min(1).max(64).optional(),
 }).refine((data) => {
   // 'gathering' è "post-style": può avere orario o no, non forziamo
   // startTime/endTime. 'appointment' e 'commitment' restano timeboxed.
@@ -98,6 +103,11 @@ export const updateEventSchema = z.object({
   coverAttachmentId: z.string().uuid().nullable().optional(),
   // Se passato, il set viene SOSTITUITO (delete + insert). Se omesso, intatto.
   externalLinks: z.array(externalLinkInputSchema).max(10).optional(),
+  // ── Geolocalizzazione (042): luogo testuale + coordinate + timezone evento ──
+  locationName: z.string().min(1).max(255).optional(),
+  locationLat: z.number().min(-90).max(90).optional(),
+  locationLng: z.number().min(-180).max(180).optional(),
+  timezone: z.string().min(1).max(64).optional(),
 });
 
 // ── Change status ──

@@ -14,6 +14,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.put('/api/auth/me', { preHandler: [authenticate] }, ctrl.updateMeHandler);
   app.put('/api/auth/change-password', { preHandler: [authenticate] }, ctrl.changePasswordHandler);
   app.put('/api/auth/fcm-token', { preHandler: [authenticate] }, ctrl.updateFcmTokenHandler);
+  app.put('/api/auth/me/timezone', { preHandler: [authenticate] }, ctrl.updateTimezoneHandler);
   app.get('/api/auth/preferences', { preHandler: [authenticate] }, ctrl.getDashboardPreferencesHandler);
   app.put('/api/auth/preferences', { preHandler: [authenticate] }, ctrl.updateDashboardPreferencesHandler);
 

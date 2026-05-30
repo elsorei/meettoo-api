@@ -15,6 +15,7 @@ import { operatorsRoutes } from '../modules/operators/operators.routes';
 import { sharingRoutes } from '../modules/sharing/sharing.routes';
 import { contactsRoutes } from '../modules/contacts/contacts.routes';
 import { feedRoutes } from '../modules/feed/feed.routes';
+import { videoRoutes } from '../modules/video/video.routes';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -135,6 +136,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(sharingRoutes);
   await app.register(contactsRoutes);
   await app.register(feedRoutes);
+  await app.register(videoRoutes);
 
   return app;
 }

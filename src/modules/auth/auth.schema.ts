@@ -43,9 +43,17 @@ export const dashboardPreferencesSchema = z.object({
   })).max(20),
 });
 
+// Timezone IANA: il client manda una stringa che `Intl.DateTimeFormat()`
+// riconosce (es. 'Europe/Rome'). Niente check IANA stretto lato server,
+// solo lunghezza (>0 e <=64, come la colonna users.timezone).
+export const updateTimezoneSchema = z.object({
+  timezone: z.string().trim().min(1, 'Timezone obbligatoria').max(64, 'Timezone troppo lunga'),
+});
+
 export type LoginInput = z.infer<typeof loginSchema>;
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type RefreshInput = z.infer<typeof refreshSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
 export type UpdateProfileInput = z.infer<typeof updateProfileSchema>;
 export type DashboardPreferencesInput = z.infer<typeof dashboardPreferencesSchema>;
+export type UpdateTimezoneInput = z.infer<typeof updateTimezoneSchema>;
