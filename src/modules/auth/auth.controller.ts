@@ -171,6 +171,18 @@ export async function resetPasswordHandler(request: FastifyRequest, reply: Fasti
   return reply.send({ success: true, message: 'Password aggiornata. Effettua di nuovo il login.' });
 }
 
+// ── CANCELLAZIONE ACCOUNT ──
+
+export async function deleteAccountHandler(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const { password } = (request.body ?? {}) as { password?: string };
+  if (!password) {
+    throw new ValidationError('La password è richiesta per cancellare l\'account');
+  }
+  await authService.deleteAccount(req.user.userId, password);
+  return reply.send({ success: true, message: 'Account cancellato' });
+}
+
 // ── PHOTO PROFILO ──
 
 export async function uploadMePhotoHandler(request: FastifyRequest, reply: FastifyReply) {

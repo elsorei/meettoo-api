@@ -23,6 +23,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   // Protected routes
   app.post('/api/auth/logout', { preHandler: [authenticate] }, ctrl.logoutHandler);
+  app.delete('/api/auth/me', { preHandler: [authenticate], ...strictLimit(5, '5 minutes') }, ctrl.deleteAccountHandler);
   app.get('/api/auth/me', { preHandler: [authenticate] }, ctrl.getMeHandler);
   app.put('/api/auth/me', { preHandler: [authenticate] }, ctrl.updateMeHandler);
   app.put('/api/auth/change-password', { preHandler: [authenticate] }, ctrl.changePasswordHandler);

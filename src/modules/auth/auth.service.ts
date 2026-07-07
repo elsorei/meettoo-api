@@ -1,4 +1,4 @@
-import { queryOne, query } from '../../shared/db';
+import { queryOne, query, transaction } from '../../shared/db';
 import { verifyPassword, hashPassword } from '../../core/auth/password';
 import { signAccessToken, signRefreshToken, verifyRefreshToken, TokenPayload } from '../../core/auth/jwt';
 import { getRedis } from '../../config/redis';
@@ -198,6 +198,73 @@ export async function confirmPasswordReset(token: string, newPassword: string): 
 export async function revokeAllRefreshTokens(userId: string): Promise<void> {
   const redis = await getRedis();
   await redis.del(`refresh:${userId}`);
+}
+
+// ── CANCELLAZIONE ACCOUNT (GDPR) ──
+
+/**
+ * Cancella l'account dell'utente autenticato (richiede la password).
+ *
+ * Soft-delete con anonimizzazione: il record users resta (gli eventi passati
+ * riferiscono owner_id senza cascade) ma tutti i dati personali vengono
+ * rimossi e le credenziali invalidate. In transazione:
+ *   - annulla gli eventi futuri di cui è owner
+ *   - rimuove partecipazioni, permessi condivisi, contatti, notifiche, token
+ *   - anonimizza il record utente e lo disattiva
+ * Infine revoca tutti i refresh token.
+ */
+export async function deleteAccount(userId: string, password: string): Promise<void> {
+  const user = await queryOne<UserRow>(
+    `SELECT ${SELECT_USER} FROM users WHERE id = $1 AND is_active = true`,
+    [userId]
+  );
+  if (!user) throw new NotFoundError('Utente non trovato');
+
+  const { valid } = await verifyPassword(password, user.password_hash, user.password_version);
+  if (!valid) throw new BadRequestError('Password non corretta');
+
+  await transaction(async (client) => {
+    await client.query(
+      `UPDATE events SET status = 'cancelled', updated_at = NOW()
+       WHERE owner_id = $1 AND event_date >= CURRENT_DATE AND status <> 'cancelled'`,
+      [userId]
+    );
+    await client.query(`DELETE FROM event_participants WHERE user_id = $1`, [userId]);
+    await client.query(
+      `DELETE FROM share_permissions WHERE grantor_user_id = $1 OR grantee_user_id = $1`,
+      [userId]
+    );
+    await client.query(
+      `DELETE FROM contacts WHERE requester_id = $1 OR addressee_id = $1`,
+      [userId]
+    );
+    await client.query(`DELETE FROM notifications WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM auth_tokens WHERE user_id = $1`, [userId]);
+    await client.query(
+      `UPDATE users SET
+         username = 'deleted_' || id,
+         email = NULL,
+         name = 'Utente eliminato',
+         phone = NULL,
+         photo_url = NULL,
+         fcm_token = NULL,
+         password_hash = '!',
+         password_version = 2,
+         email_verified = false,
+         is_active = false,
+         dashboard_preferences = '{}',
+         deleted_at = NOW(),
+         updated_at = NOW()
+       WHERE id = $1`,
+      [userId]
+    );
+  });
+
+  // Fuori dalla transazione: file foto e sessioni.
+  if (user.photo_url) {
+    deleteUploadedFile(user.photo_url);
+  }
+  await revokeAllRefreshTokens(userId);
 }
 
 /** Accesso consumer tramite email + password. */
