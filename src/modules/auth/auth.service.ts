@@ -8,7 +8,7 @@ import { normalizePhone } from '../../core/phone';
 import { saveUploadedFile, deleteUploadedFile, getAbsolutePath } from '../../shared/file-upload';
 import { existsSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { sendEmail } from '../../core/email/mailer';
+import { sendEmail, escapeHtml } from '../../core/email/mailer';
 import { issueAuthToken, consumeAuthToken } from './auth-tokens.service';
 import { env } from '../../config/env';
 import { linkPendingInvitesToUser } from '../agenda/guests.service';
@@ -153,7 +153,7 @@ async function sendVerificationEmail(userId: string, email: string, name: string
     email,
     'Conferma il tuo indirizzo email — MeetToo',
     `Ciao ${name || ''}!\n\nConferma il tuo indirizzo email aprendo questo link:\n${link}\n\nIl link scade tra 24 ore. Se non ti sei registrato su MeetToo, ignora questa email.`,
-    `<p>Ciao ${name || ''}!</p><p>Conferma il tuo indirizzo email cliccando il pulsante:</p><p><a href="${link}" style="background:#5A4AF4;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none">Conferma email</a></p><p>Il link scade tra 24 ore. Se non ti sei registrato su MeetToo, ignora questa email.</p>`
+    `<p>Ciao ${escapeHtml(name || '')}!</p><p>Conferma il tuo indirizzo email cliccando il pulsante:</p><p><a href="${link}" style="background:#5A4AF4;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none">Conferma email</a></p><p>Il link scade tra 24 ore. Se non ti sei registrato su MeetToo, ignora questa email.</p>`
   );
 }
 
@@ -198,7 +198,7 @@ export async function requestPasswordReset(email: string): Promise<void> {
     user.email,
     'Reimposta la tua password — MeetToo',
     `Ciao ${user.name || ''}!\n\nPer reimpostare la password apri questo link:\n${link}\n\nIl link scade tra 1 ora. Se non hai richiesto il reset, ignora questa email: la tua password resta invariata.`,
-    `<p>Ciao ${user.name || ''}!</p><p>Per reimpostare la password clicca il pulsante:</p><p><a href="${link}" style="background:#5A4AF4;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none">Reimposta password</a></p><p>Il link scade tra 1 ora. Se non hai richiesto il reset, ignora questa email: la tua password resta invariata.</p>`
+    `<p>Ciao ${escapeHtml(user.name || '')}!</p><p>Per reimpostare la password clicca il pulsante:</p><p><a href="${link}" style="background:#5A4AF4;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none">Reimposta password</a></p><p>Il link scade tra 1 ora. Se non hai richiesto il reset, ignora questa email: la tua password resta invariata.</p>`
   );
 }
 
@@ -222,11 +222,23 @@ export async function confirmPasswordReset(token: string, newPassword: string): 
 /** Revoca tutti i refresh token dell'utente (logout globale, tutti i device). */
 export async function revokeAllRefreshTokens(userId: string): Promise<void> {
   const redis = await getRedis();
-  const sids = await redis.sMembers(sessionsKey(userId));
-  const keys = sids.map((sid) => refreshKey(userId, sid));
+  const keys = new Set<string>();
+
+  // Sorgente primaria: il set delle sessioni.
+  for (const sid of await redis.sMembers(sessionsKey(userId))) {
+    keys.add(refreshKey(userId, sid));
+  }
+  // Fallback difensivo: SCAN per catturare eventuali refresh:{userId}:*
+  // orfani (set scaduto prima del token, sessioni legacy). SCAN è O(N) sul
+  // keyspace ma è un'operazione rara (reset/logout-all/cancellazione).
+  for await (const key of redis.scanIterator({ MATCH: `refresh:${userId}:*`, COUNT: 100 })) {
+    if (Array.isArray(key)) key.forEach((k) => keys.add(k));
+    else keys.add(key);
+  }
   // Include anche la chiave legacy pre-multi-device.
-  keys.push(`refresh:${userId}`);
-  await redis.del(keys);
+  keys.add(`refresh:${userId}`);
+
+  await redis.del([...keys]);
   await redis.del(sessionsKey(userId));
 }
 
@@ -377,6 +389,12 @@ export async function refreshTokens(token: string): Promise<{ accessToken: strin
   const refreshToken = signRefreshToken(newPayload);
 
   await redis.set(refreshKey(payload.userId, payload.sid), refreshToken, { EX: REFRESH_TTL_SECONDS });
+  // Rinnova l'appartenenza al set delle sessioni e ne estende il TTL: senza
+  // questo il set scadrebbe a 30 giorni dal LOGIN mentre il refresh token
+  // vive a rotazione infinita, e un logout-all/reset non revocherebbe più
+  // questa sessione (sMembers tornerebbe vuoto).
+  await redis.sAdd(sessionsKey(payload.userId), payload.sid);
+  await redis.expire(sessionsKey(payload.userId), REFRESH_TTL_SECONDS);
 
   return { accessToken, refreshToken };
 }

@@ -35,7 +35,13 @@ export async function agendaRoutes(app: FastifyInstance): Promise<void> {
   app.delete('/api/events/:id/participants/:userId', auth, ctrl.removeParticipant);
 
   // ── Guests (inviti, anche via email a chi non ha account) ──
-  app.post('/api/events/:id/guests', auth, ctrl.inviteGuest);
+  // L'invito spedisce email verso indirizzi arbitrari: limite stretto per IP
+  // per prevenire spam/abuso di deliverability dal dominio MeetToo.
+  const inviteLimit = {
+    preHandler: [authenticate],
+    config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+  };
+  app.post('/api/events/:id/guests', inviteLimit, ctrl.inviteGuest);
   app.delete('/api/events/:id/guests/:guestId', auth, ctrl.removeGuest);
   app.put('/api/events/:id/guests/respond', auth, ctrl.respondAsGuest);
 

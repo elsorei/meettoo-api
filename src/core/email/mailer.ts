@@ -44,3 +44,18 @@ export function isSmtpConfigured(): boolean {
   getTransporter();
   return smtpConfigured;
 }
+
+/**
+ * Escapa i caratteri HTML pericolosi. Da usare SEMPRE su valori controllati
+ * dall'utente (nome profilo, titolo evento, ...) prima di interpolarli nel
+ * corpo HTML di un'email: previene HTML/phishing injection nelle email
+ * spedite dal dominio legittimo.
+ */
+export function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}

@@ -9,34 +9,11 @@ import { initSocketIO, closeSocketIO } from './core/websocket/socket';
 import { initVideoSocket } from './modules/video/video.socket';
 import { initPush } from './core/notifications/push';
 import { startReminderScheduler } from './core/notifications/reminder-scheduler';
-import { readFileSync, readdirSync } from 'fs';
+import { runMigrations as runMigrationsTracked } from './migrations/runner';
 import { join } from 'path';
 
 async function runMigrations() {
-  const pool = getPool();
-  const migrationsDir = join(__dirname, 'migrations');
-  let files: string[];
-  try {
-    files = readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).sort();
-  } catch {
-    console.log('[Migrations] No migrations directory found, skipping');
-    return;
-  }
-  console.log(`[Migrations] Found ${files.length} migration files`);
-  for (const file of files) {
-    const sql = readFileSync(join(migrationsDir, file), 'utf-8');
-    try {
-      await pool.query(sql);
-      console.log(`[Migrations] ${file} - OK`);
-    } catch (err: any) {
-      if (err.message?.includes('already exists')) {
-        console.log(`[Migrations] ${file} - SKIP (already applied)`);
-      } else {
-        console.error(`[Migrations] ${file} - ERROR: ${err.message}`);
-      }
-    }
-  }
-  console.log('[Migrations] All migrations complete');
+  await runMigrationsTracked(getPool(), join(__dirname, 'migrations'));
 }
 
 async function main() {

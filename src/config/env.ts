@@ -31,6 +31,11 @@ const envSchema = z.object({
 
   UPLOAD_DIR: z.string().default('./uploads'),
   MAX_FILE_SIZE: z.coerce.number().default(52428800), // 50MB
+
+  // Numero di proxy fidati davanti all'app (LB/ingress). Determina quale hop
+  // di X-Forwarded-For diventa request.ip: se troppo alto, il client può
+  // spoofare l'header e aggirare il rate limiting. Railway/molti PaaS = 1.
+  TRUST_PROXY: z.coerce.number().int().min(0).default(1),
 });
 
 export type Env = z.infer<typeof envSchema>;

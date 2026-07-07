@@ -428,11 +428,22 @@ export async function getEventById(eventId: string, requesterId: string): Promis
 
   // Inviti guest (047): roster, flag "gli invitati possono invitare" e
   // can_invite calcolato per il richiedente (la UI si limita a rispecchiarlo).
-  const guests = await guestsService.listGuests(eventId);
   const canInviteFlag = await guestsService.canInvite(
     event as any,
     requesterId
   );
+
+  // Le email degli invitati sono PII: un evento pubblico è leggibile da
+  // chiunque, ma il roster con le email va mostrato solo a chi ha una
+  // relazione con l'evento (owner/creator/partecipante/invitato/admin).
+  // Agli altri (visitatori di un evento pubblico) diamo solo il conteggio.
+  const isInsider = isOwner || isCreator || isParticipant || isAdmin;
+  const guests = isInsider
+    ? await guestsService.listGuests(eventId)
+    : [];
+  const guestCount = isInsider
+    ? guests.length
+    : await guestsService.countGuests(eventId);
 
   return {
     ...event,
@@ -441,6 +452,7 @@ export async function getEventById(eventId: string, requesterId: string): Promis
     linked_event: linkedEvent,
     external_links: externalLinks,
     guests,
+    guest_count: guestCount,
     can_invite: canInviteFlag,
   };
 }

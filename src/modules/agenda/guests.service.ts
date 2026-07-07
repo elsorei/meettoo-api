@@ -1,6 +1,6 @@
 import { queryOne, queryMany, query } from '../../shared/db';
 import { NotFoundError, ForbiddenError, BadRequestError } from '../../core/errors';
-import { sendEmail } from '../../core/email/mailer';
+import { sendEmail, escapeHtml } from '../../core/email/mailer';
 import { env } from '../../config/env';
 
 export interface GuestRow {
@@ -31,6 +31,15 @@ export async function listGuests(eventId: string): Promise<GuestRow[]> {
      ORDER BY g.created_at`,
     [eventId]
   );
+}
+
+/** Numero di invitati dell'evento (senza esporre le email/PII). */
+export async function countGuests(eventId: string): Promise<number> {
+  const row = await queryOne<{ n: string }>(
+    `SELECT COUNT(*)::int AS n FROM event_guests WHERE event_id = $1`,
+    [eventId]
+  );
+  return row ? Number(row.n) : 0;
 }
 
 /** L'utente è nella lista invitati dell'evento? */
@@ -113,32 +122,40 @@ export async function inviteGuest(
       `SELECT name, username FROM users WHERE id = $1`,
       [requesterId]
     );
-    const inviterName = inviter?.name || inviter?.username || 'Un amico';
+    // escapeHtml: nome profilo e titolo evento sono controllati dall'utente e
+    // finiscono nell'HTML di un'email spedita a un indirizzo arbitrario →
+    // vanno neutralizzati per evitare injection/phishing.
+    const inviterName = escapeHtml(inviter?.name || inviter?.username || 'Un amico');
+    const title = escapeHtml(event.title);
     const link = `${env().APP_URL}/e/${eventId}`;
     await sendEmail(
       normEmail,
-      `${inviterName} ti ha invitato: ${event.title} — MeetToo`,
-      `${inviterName} ti ha invitato a "${event.title}" (${event.event_date}).\n\nApri l'invito: ${link}\n\nSe non hai ancora MeetToo, potrai creare l'account in pochi secondi e rispondere all'invito.`,
-      `<p><strong>${inviterName}</strong> ti ha invitato a <strong>${event.title}</strong> (${event.event_date}).</p><p><a href="${link}" style="background:#5A4AF4;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none">Apri l'invito</a></p><p>Se non hai ancora MeetToo, potrai creare l'account in pochi secondi e rispondere all'invito.</p>`
+      `${inviter?.name || inviter?.username || 'Un amico'} ti ha invitato: ${event.title} — MeetToo`,
+      `${inviter?.name || inviter?.username || 'Un amico'} ti ha invitato a "${event.title}" (${event.event_date}).\n\nApri l'invito: ${link}\n\nSe non hai ancora MeetToo, potrai creare l'account in pochi secondi e rispondere all'invito.`,
+      `<p><strong>${inviterName}</strong> ti ha invitato a <strong>${title}</strong> (${event.event_date}).</p><p><a href="${link}" style="background:#5A4AF4;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none">Apri l'invito</a></p><p>Se non hai ancora MeetToo, potrai creare l'account in pochi secondi e rispondere all'invito.</p>`
     );
   } catch (err) {
     console.error('[guests] invio email invito fallito:', err);
   }
 
-  const rows = await queryMany<GuestRow>(
-    `SELECT g.id, g.event_id, g.user_id,
-            COALESCE(u.email, g.email) as email,
-            COALESCE(u.name, g.name) as name,
-            g.status, g.invited_by,
-            COALESCE(inv.name, inv.username) as invited_by_name,
-            g.created_at
-     FROM event_guests g
-     LEFT JOIN users u ON u.id = g.user_id
-     LEFT JOIN users inv ON inv.id = g.invited_by
-     WHERE g.id = $1`,
-    [inserted.id]
+  // Risposta anti-enumeration: NON riveliamo se l'email appartiene a un account
+  // (user_id/name risolti). Ritorniamo l'invito così come inserito; il roster
+  // completo (con i nomi) è visibile solo a chi ha accesso all'evento.
+  const inviterName = await queryOne<{ invited_by_name: string | null }>(
+    `SELECT COALESCE(name, username) as invited_by_name FROM users WHERE id = $1`,
+    [requesterId]
   );
-  return rows[0];
+  return {
+    id: inserted.id,
+    event_id: eventId,
+    user_id: null,
+    email: normEmail,
+    name: null,
+    status: 'pending',
+    invited_by: requesterId,
+    invited_by_name: inviterName?.invited_by_name ?? null,
+    created_at: new Date().toISOString(),
+  };
 }
 
 /** Rimuove un invitato. Solo owner/creator dell'evento (o l'invitato stesso). */

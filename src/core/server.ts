@@ -27,7 +27,10 @@ export async function buildServer(): Promise<FastifyInstance> {
         ? { target: 'pino-pretty', options: { translateTime: 'HH:MM:ss', ignore: 'pid,hostname' } }
         : undefined,
     },
-    trustProxy: true,
+    // Fidati solo di N proxy noti (non di tutti gli hop): così request.ip usa
+    // l'IP client-facing reale e X-Forwarded-For non è spoofabile per bypassare
+    // il rate limiting. Configurabile via TRUST_PROXY (default 1).
+    trustProxy: env().TRUST_PROXY,
   });
 
   // CORS (origini condivise con il WebSocket: config/cors.ts)
