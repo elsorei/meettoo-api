@@ -15,17 +15,11 @@ const envSchema = z.object({
 
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().optional(),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_FROM: z.string().default('MeetToo <noreply@example.com>'),
 
-  IMAP_HOST: z.string().optional(),
-  IMAP_PORT: z.coerce.number().default(993),
-  IMAP_INFO_USER: z.string().optional(),
-  IMAP_INFO_PASS: z.string().optional(),
-  IMAP_FISCALE_USER: z.string().optional(),
-  IMAP_FISCALE_PASS: z.string().optional(),
-  IMAP_LAVORO_USER: z.string().optional(),
-  IMAP_LAVORO_PASS: z.string().optional(),
-
-  APP_URL: z.string().default('https://studiorei-panel-production.up.railway.app'),
+  APP_URL: z.string().default('http://localhost:3000'),
 
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
