@@ -42,8 +42,15 @@ export async function refreshHandler(request: FastifyRequest, reply: FastifyRepl
 
 export async function logoutHandler(request: FastifyRequest, reply: FastifyReply) {
   const req = request as AuthRequest;
-  await authService.logout(req.user.userId);
+  // Disconnette solo la sessione (dispositivo) corrente; gli altri device restano attivi.
+  await authService.logout(req.user.userId, req.user.sid);
   return reply.status(200).send({ success: true, message: 'Logged out' });
+}
+
+export async function logoutAllHandler(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  await authService.revokeAllRefreshTokens(req.user.userId);
+  return reply.status(200).send({ success: true, message: 'Logged out from all devices' });
 }
 
 export async function getMeHandler(request: FastifyRequest, reply: FastifyReply) {

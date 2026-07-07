@@ -5,6 +5,12 @@ import { Role } from './roles';
 export interface TokenPayload {
   userId: string;
   role: Role;
+  /**
+   * Session ID (per-dispositivo): lega access e refresh token a una sessione
+   * revocabile singolarmente. Assente solo nei token emessi prima del
+   * supporto multi-device, che non superano più il refresh.
+   */
+  sid?: string;
 }
 
 export function signAccessToken(payload: TokenPayload): string {

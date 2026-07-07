@@ -7,6 +7,7 @@ import { Role } from '../../core/auth/roles';
 import { normalizePhone } from '../../core/phone';
 import { saveUploadedFile, deleteUploadedFile, getAbsolutePath } from '../../shared/file-upload';
 import { existsSync, unlinkSync } from 'fs';
+import { randomUUID } from 'crypto';
 import { sendEmail } from '../../core/email/mailer';
 import { issueAuthToken, consumeAuthToken } from './auth-tokens.service';
 import { env } from '../../config/env';
@@ -57,16 +58,31 @@ function toSessionUser(row: UserRow): SessionUser {
   };
 }
 
+const REFRESH_TTL_SECONDS = 30 * 24 * 3600;
+
+/** Chiave Redis del refresh token di una singola sessione (dispositivo). */
+const refreshKey = (userId: string, sid: string) => `refresh:${userId}:${sid}`;
+/** Set Redis con i sid delle sessioni attive dell'utente. */
+const sessionsKey = (userId: string) => `sessions:${userId}`;
+
+/**
+ * Emette una coppia di token per una NUOVA sessione (dispositivo).
+ * Ogni login crea un sid indipendente: accedere dal tablet non disconnette
+ * il telefono. Il refresh token vive in Redis per revoca puntuale o globale.
+ */
 async function issueTokens(
   userId: string,
   role: Role
 ): Promise<{ accessToken: string; refreshToken: string }> {
-  const payload: TokenPayload = { userId, role };
+  const sid = randomUUID();
+  const payload: TokenPayload = { userId, role, sid };
   const accessToken = signAccessToken(payload);
   const refreshToken = signRefreshToken(payload);
-  // Store refresh token in Redis (for invalidation on logout)
+
   const redis = await getRedis();
-  await redis.set(`refresh:${userId}`, refreshToken, { EX: 30 * 24 * 3600 });
+  await redis.set(refreshKey(userId, sid), refreshToken, { EX: REFRESH_TTL_SECONDS });
+  await redis.sAdd(sessionsKey(userId), sid);
+  await redis.expire(sessionsKey(userId), REFRESH_TTL_SECONDS);
   return { accessToken, refreshToken };
 }
 
@@ -194,10 +210,15 @@ export async function confirmPasswordReset(token: string, newPassword: string): 
   return true;
 }
 
-/** Revoca tutti i refresh token dell'utente (logout globale). */
+/** Revoca tutti i refresh token dell'utente (logout globale, tutti i device). */
 export async function revokeAllRefreshTokens(userId: string): Promise<void> {
   const redis = await getRedis();
-  await redis.del(`refresh:${userId}`);
+  const sids = await redis.sMembers(sessionsKey(userId));
+  const keys = sids.map((sid) => refreshKey(userId, sid));
+  // Include anche la chiave legacy pre-multi-device.
+  keys.push(`refresh:${userId}`);
+  await redis.del(keys);
+  await redis.del(sessionsKey(userId));
 }
 
 // ── CANCELLAZIONE ACCOUNT (GDPR) ──
@@ -315,9 +336,15 @@ export async function refreshTokens(token: string): Promise<{ accessToken: strin
     throw new UnauthorizedError('Invalid refresh token');
   }
 
-  // Check if refresh token matches stored one (not revoked)
+  // Token emessi prima del multi-device (senza sid): non più validi.
+  if (!payload.sid) {
+    throw new UnauthorizedError('Refresh token revoked');
+  }
+
+  // La sessione deve esistere in Redis e il token deve combaciare (rotazione:
+  // un refresh token già ruotato non è riutilizzabile).
   const redis = await getRedis();
-  const stored = await redis.get(`refresh:${payload.userId}`);
+  const stored = await redis.get(refreshKey(payload.userId, payload.sid));
   if (stored !== token) {
     throw new UnauthorizedError('Refresh token revoked');
   }
@@ -331,18 +358,28 @@ export async function refreshTokens(token: string): Promise<{ accessToken: strin
     throw new UnauthorizedError('Account not found or disabled');
   }
 
-  const newPayload: TokenPayload = { userId: payload.userId, role: user.role };
+  // Rotazione mantenendo lo stesso sid (stessa sessione/dispositivo).
+  const newPayload: TokenPayload = { userId: payload.userId, role: user.role, sid: payload.sid };
   const accessToken = signAccessToken(newPayload);
   const refreshToken = signRefreshToken(newPayload);
 
-  await redis.set(`refresh:${payload.userId}`, refreshToken, { EX: 30 * 24 * 3600 });
+  await redis.set(refreshKey(payload.userId, payload.sid), refreshToken, { EX: REFRESH_TTL_SECONDS });
 
   return { accessToken, refreshToken };
 }
 
-export async function logout(userId: string): Promise<void> {
+/**
+ * Logout della sessione corrente (solo il dispositivo che lo richiede).
+ * Se il token non ha sid (legacy) revoca tutte le sessioni.
+ */
+export async function logout(userId: string, sid?: string): Promise<void> {
+  if (!sid) {
+    await revokeAllRefreshTokens(userId);
+    return;
+  }
   const redis = await getRedis();
-  await redis.del(`refresh:${userId}`);
+  await redis.del(refreshKey(userId, sid));
+  await redis.sRem(sessionsKey(userId), sid);
 }
 
 export async function changePassword(
