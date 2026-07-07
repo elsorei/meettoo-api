@@ -5,7 +5,9 @@ import * as ctrl from './agenda.controller';
 export async function agendaRoutes(app: FastifyInstance): Promise<void> {
   // All agenda routes require authentication
   const auth = { preHandler: [authenticate] };
-  const staffOnly = { preHandler: [authenticate, requireRole('operator')] };
+  // Gestione dei permessi sul proprio calendario: aperta a ogni account
+  // reale ('user' consumer e superiori), esclusi i 'client' legacy.
+  const accountOnly = { preHandler: [authenticate, requireRole('user')] };
 
   // ── Events CRUD ──
   app.get('/api/events', auth, ctrl.listEvents);
@@ -38,8 +40,8 @@ export async function agendaRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/events/:id/attachments/:attId/download', auth, ctrl.downloadAttachment);
   app.delete('/api/events/:id/attachments/:attId', auth, ctrl.deleteAttachment);
 
-  // ── Calendar permissions (operators only) ──
-  app.get('/api/calendar/permissions', staffOnly, ctrl.getCalendarPermissions);
-  app.post('/api/calendar/permissions', staffOnly, ctrl.grantCalendarPermission);
-  app.delete('/api/calendar/permissions/:viewerUserId', staffOnly, ctrl.revokeCalendarPermission);
+  // ── Calendar permissions (any real account) ──
+  app.get('/api/calendar/permissions', accountOnly, ctrl.getCalendarPermissions);
+  app.post('/api/calendar/permissions', accountOnly, ctrl.grantCalendarPermission);
+  app.delete('/api/calendar/permissions/:viewerUserId', accountOnly, ctrl.revokeCalendarPermission);
 }

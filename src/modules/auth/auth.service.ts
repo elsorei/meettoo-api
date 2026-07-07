@@ -93,7 +93,7 @@ export async function register(
   const passwordHash = await hashPassword(password);
   const user = await queryOne<UserRow>(
     `INSERT INTO users (username, email, name, phone, password_hash, password_version, role, is_active)
-     VALUES ($1, $1, $2, $3, $4, 2, 'operator', true)
+     VALUES ($1, $1, $2, $3, $4, 2, 'user', true)
      RETURNING ${SELECT_USER}`,
     [normEmail, name.trim(), normPhone, passwordHash]
   );

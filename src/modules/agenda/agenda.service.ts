@@ -3,7 +3,7 @@ import { PoolClient } from 'pg';
 import { RRule } from 'rrule';
 import { NotFoundError, ForbiddenError, BadRequestError } from '../../core/errors';
 import { CreateEventInput, UpdateEventInput, ListEventsQuery } from './agenda.schema';
-import { Role, hasMinimumRole } from '../../core/auth/roles';
+import { Role, hasMinimumRole, isStaff } from '../../core/auth/roles';
 import { syncEventToGCalAsync, deleteEventFromGCalAsync } from './gcalendar.hooks';
 import { triggerNewEvent } from '../../core/notifications/triggers';
 import { getEffectiveLevel } from '../sharing/sharing.service';
@@ -345,9 +345,16 @@ export async function getEventById(eventId: string, requesterId: string): Promis
   const isPubliclyReadable = PUBLIC_VISIBILITIES.has(event.visibility);
 
   if (!isParticipant && !isOwner && !isCreator && !isAdmin && !isPubliclyReadable) {
-    // Operatori possono vedere le agende dei colleghi senza permessi espliciti
-    if (requester?.role !== 'operator') {
-      throw new ForbiddenError('You do not have access to this event');
+    // Solo lo staff interno (operator+) vede le agende dei colleghi senza
+    // permessi espliciti. Gli account consumer ('user'/'client') devono avere
+    // un permesso white/write concesso dal proprietario dell'evento.
+    if (!isStaff(requester?.role || 'client')) {
+      const level = await getEffectiveLevel(
+        event.owner_id, requesterId, requester?.role || 'client', 'agenda'
+      );
+      if (level !== 'white' && level !== 'write') {
+        throw new ForbiddenError('You do not have access to this event');
+      }
     }
   }
 
@@ -524,10 +531,19 @@ export async function getCalendarEvents(
 ): Promise<any[]> {
   const targetUserId = operatorId || requesterId;
 
-  // Tutti gli operatori/admin/owner possono vedere le agende dei colleghi.
-  // Solo i client non possono accedere ai calendari degli operatori.
-  if (operatorId && operatorId !== requesterId && requesterRole === 'client') {
-    throw new ForbiddenError('No permission to view this calendar');
+  // Solo lo staff interno (operator/admin/owner) può aprire i calendari dei
+  // colleghi senza permesso esplicito. Gli account consumer ('user'/'client')
+  // possono vedere il calendario di un altro utente SOLO se questi ha
+  // concesso un permesso in share_permissions (anche solo 'ghost').
+  if (operatorId && operatorId !== requesterId && !isStaff(requesterRole)) {
+    const grant = await queryOne<{ level: string }>(
+      `SELECT level FROM share_permissions
+       WHERE resource_type = 'agenda' AND grantor_user_id = $1 AND grantee_user_id = $2`,
+      [operatorId, requesterId]
+    );
+    if (!grant) {
+      throw new ForbiddenError('No permission to view this calendar');
+    }
   }
 
   // Quando si guarda il calendario di un altro operatore, applichiamo il

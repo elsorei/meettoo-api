@@ -12,6 +12,7 @@ import {
 import { BadRequestError, ValidationError } from '../../core/errors';
 import { AuthRequest } from '../../shared/types';
 import { paginate } from '../../shared/pagination';
+import { assertCanViewFreeBusy } from '../sharing/sharing.service';
 
 // ── CRUD ──
 
@@ -134,8 +135,11 @@ export async function convertEvent(request: FastifyRequest, reply: FastifyReply)
 // ── AVAILABILITY ──
 
 export async function checkAvailability(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
   const parsed = availabilityQuerySchema.safeParse(request.query);
   if (!parsed.success) throw new ValidationError('Invalid query', parsed.error.flatten());
+
+  await assertCanViewFreeBusy([parsed.data.userId], req.user.userId, req.user.role);
 
   const result = await availabilityService.checkAvailability(
     parsed.data.userId, parsed.data.date,
@@ -146,8 +150,11 @@ export async function checkAvailability(request: FastifyRequest, reply: FastifyR
 }
 
 export async function getBusySlots(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
   const { userId, from, to } = request.query as { userId: string; from: string; to: string };
   if (!userId || !from || !to) throw new ValidationError('userId, from and to are required');
+
+  await assertCanViewFreeBusy([userId], req.user.userId, req.user.role);
 
   const slots = await availabilityService.getBusySlots(userId, from, to);
   return reply.send({ success: true, data: slots });
@@ -215,19 +222,23 @@ export async function deleteOccurrence(request: FastifyRequest, reply: FastifyRe
 // ── Multi-operator availability ──
 
 export async function checkMultiAvailability(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
   const { userIds, date, startTime, endTime } = request.query as { userIds: string; date: string; startTime: string; endTime: string };
   if (!userIds || !date || !startTime || !endTime) throw new ValidationError('userIds, date, startTime, endTime required');
 
   const ids = userIds.split(',');
+  await assertCanViewFreeBusy(ids, req.user.userId, req.user.role);
   const result = await commonAvail.checkMultiAvailability(ids, date, startTime, endTime);
   return reply.send({ success: true, data: result });
 }
 
 export async function findCommonSlot(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
   const { userIds, fromDate, duration } = request.query as { userIds: string; fromDate: string; duration: string };
   if (!userIds || !fromDate) throw new ValidationError('userIds and fromDate required');
 
   const ids = userIds.split(',');
+  await assertCanViewFreeBusy(ids, req.user.userId, req.user.role);
   const durationMin = parseInt(duration) || 60;
   const slot = await commonAvail.findCommonSlot(ids, fromDate, durationMin);
   return reply.send({ success: true, data: slot });

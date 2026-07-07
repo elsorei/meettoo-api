@@ -1,5 +1,5 @@
 import { query, queryOne, queryMany } from '../../shared/db';
-import { Role, hasMinimumRole } from '../../core/auth/roles';
+import { Role, hasMinimumRole, isStaff } from '../../core/auth/roles';
 import { ForbiddenError, NotFoundError } from '../../core/errors';
 
 export type ShareResource = 'agenda' | 'todo';
@@ -59,6 +59,37 @@ export async function getEffectiveLevelsForGrantors(
   );
   for (const r of rows) out.set(r.grantor_user_id, r.level);
   return out;
+}
+
+/**
+ * Verifica che il richiedente possa vedere il free/busy (disponibilità,
+ * busy slots, calendario in modalità ghost) degli utenti indicati.
+ *
+ * Regole consumer:
+ *   - se stesso → sempre ok
+ *   - staff (operator/admin/owner) → ok su tutti (comportamento gestionale)
+ *   - 'user'/'client' → serve un permesso esplicito in share_permissions
+ *     (qualsiasi livello: anche 'ghost' abilita il free/busy) concesso da
+ *     CIASCUNO degli utenti richiesti. Altrimenti 403.
+ */
+export async function assertCanViewFreeBusy(
+  targetUserIds: string[],
+  requesterId: string,
+  requesterRole: Role,
+): Promise<void> {
+  const others = [...new Set(targetUserIds)].filter((id) => id && id !== requesterId);
+  if (others.length === 0) return;
+  if (isStaff(requesterRole)) return;
+
+  const rows = await queryMany<{ grantor_user_id: string }>(
+    `SELECT grantor_user_id FROM share_permissions
+     WHERE resource_type = 'agenda' AND grantee_user_id = $1 AND grantor_user_id = ANY($2)`,
+    [requesterId, others]
+  );
+  const granted = new Set(rows.map((r) => r.grantor_user_id));
+  if (others.some((id) => !granted.has(id))) {
+    throw new ForbiddenError('Non hai il permesso di vedere la disponibilità di questi utenti');
+  }
 }
 
 // ── CRUD permessi ─────────────────────────────────────────────────
