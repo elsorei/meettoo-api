@@ -7,6 +7,9 @@ import { Role } from '../../core/auth/roles';
 import { normalizePhone } from '../../core/phone';
 import { saveUploadedFile, deleteUploadedFile, getAbsolutePath } from '../../shared/file-upload';
 import { existsSync, unlinkSync } from 'fs';
+import { sendEmail } from '../../core/email/mailer';
+import { issueAuthToken, consumeAuthToken } from './auth-tokens.service';
+import { env } from '../../config/env';
 
 interface UserRow {
   id: string;
@@ -20,6 +23,7 @@ interface UserRow {
   role: Role;
   is_active: boolean;
   timezone: string;
+  email_verified: boolean;
 }
 
 interface SessionUser {
@@ -29,6 +33,7 @@ interface SessionUser {
   phone: string | null;
   photoUrl: string | null;
   timezone: string;
+  emailVerified: boolean;
 }
 
 interface LoginResult {
@@ -38,7 +43,7 @@ interface LoginResult {
 }
 
 const SELECT_USER =
-  'id, username, email, name, phone, photo_url, password_hash, password_version, role, is_active, timezone';
+  'id, username, email, name, phone, photo_url, password_hash, password_version, role, is_active, timezone, email_verified';
 
 function toSessionUser(row: UserRow): SessionUser {
   return {
@@ -48,6 +53,7 @@ function toSessionUser(row: UserRow): SessionUser {
     phone: row.phone,
     photoUrl: row.photo_url,
     timezone: row.timezone,
+    emailVerified: row.email_verified,
   };
 }
 
@@ -101,8 +107,97 @@ export async function register(
     throw new BadRequestError('Registrazione non riuscita');
   }
 
+  // Invio email di verifica best-effort: la registrazione non fallisce
+  // se l'SMTP è giù, l'utente può richiederla di nuovo dall'app.
+  try {
+    await sendVerificationEmail(user.id, normEmail, user.name);
+  } catch (err) {
+    console.error('[auth] invio email di verifica fallito:', err);
+  }
+
   const tokens = await issueTokens(user.id, user.role);
   return { ...tokens, user: toSessionUser(user) };
+}
+
+// ── VERIFICA EMAIL ──
+
+async function sendVerificationEmail(userId: string, email: string, name: string | null): Promise<void> {
+  const token = await issueAuthToken(userId, 'verify_email');
+  const link = `${env().APP_URL}/api/auth/verify-email/confirm?token=${token}`;
+  await sendEmail(
+    email,
+    'Conferma il tuo indirizzo email — MeetToo',
+    `Ciao ${name || ''}!\n\nConferma il tuo indirizzo email aprendo questo link:\n${link}\n\nIl link scade tra 24 ore. Se non ti sei registrato su MeetToo, ignora questa email.`,
+    `<p>Ciao ${name || ''}!</p><p>Conferma il tuo indirizzo email cliccando il pulsante:</p><p><a href="${link}" style="background:#5A4AF4;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none">Conferma email</a></p><p>Il link scade tra 24 ore. Se non ti sei registrato su MeetToo, ignora questa email.</p>`
+  );
+}
+
+/** Richiede (di nuovo) l'email di verifica per l'utente autenticato. */
+export async function requestEmailVerification(userId: string): Promise<void> {
+  const user = await queryOne<UserRow>(
+    `SELECT ${SELECT_USER} FROM users WHERE id = $1`, [userId]
+  );
+  if (!user) throw new NotFoundError('Utente non trovato');
+  if (!user.email) throw new BadRequestError('Nessuna email associata all\'account');
+  if (user.email_verified) throw new BadRequestError('Email già verificata');
+  await sendVerificationEmail(user.id, user.email, user.name);
+}
+
+/** Conferma la verifica email tramite token. Ritorna false se token non valido. */
+export async function confirmEmailVerification(token: string): Promise<boolean> {
+  const userId = await consumeAuthToken(token, 'verify_email');
+  if (!userId) return false;
+  await query(
+    `UPDATE users SET email_verified = true, email_verified_at = NOW(), updated_at = NOW() WHERE id = $1`,
+    [userId]
+  );
+  return true;
+}
+
+// ── RESET PASSWORD ──
+
+/**
+ * Richiede il reset password. Risponde sempre allo stesso modo
+ * (nessuna enumerazione degli account): se l'email esiste, invia il link.
+ */
+export async function requestPasswordReset(email: string): Promise<void> {
+  const user = await queryOne<UserRow>(
+    `SELECT ${SELECT_USER} FROM users WHERE LOWER(email) = $1 AND is_active = true`,
+    [email.trim().toLowerCase()]
+  );
+  if (!user || !user.email) return;
+
+  const token = await issueAuthToken(user.id, 'password_reset');
+  const link = `${env().APP_URL}/reset-password?token=${token}`;
+  await sendEmail(
+    user.email,
+    'Reimposta la tua password — MeetToo',
+    `Ciao ${user.name || ''}!\n\nPer reimpostare la password apri questo link:\n${link}\n\nIl link scade tra 1 ora. Se non hai richiesto il reset, ignora questa email: la tua password resta invariata.`,
+    `<p>Ciao ${user.name || ''}!</p><p>Per reimpostare la password clicca il pulsante:</p><p><a href="${link}" style="background:#5A4AF4;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none">Reimposta password</a></p><p>Il link scade tra 1 ora. Se non hai richiesto il reset, ignora questa email: la tua password resta invariata.</p>`
+  );
+}
+
+/**
+ * Completa il reset: imposta la nuova password e revoca tutte le sessioni
+ * (refresh token) esistenti dell'utente.
+ */
+export async function confirmPasswordReset(token: string, newPassword: string): Promise<boolean> {
+  const userId = await consumeAuthToken(token, 'password_reset');
+  if (!userId) return false;
+
+  const newHash = await hashPassword(newPassword);
+  await query(
+    `UPDATE users SET password_hash = $1, password_version = 2, updated_at = NOW() WHERE id = $2`,
+    [newHash, userId]
+  );
+  await revokeAllRefreshTokens(userId);
+  return true;
+}
+
+/** Revoca tutti i refresh token dell'utente (logout globale). */
+export async function revokeAllRefreshTokens(userId: string): Promise<void> {
+  const redis = await getRedis();
+  await redis.del(`refresh:${userId}`);
 }
 
 /** Accesso consumer tramite email + password. */
