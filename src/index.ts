@@ -69,7 +69,7 @@ async function main() {
 
     // Initialize Socket.io on the underlying HTTP server
     const httpServer = app.server;
-    const io = initSocketIO(httpServer);
+    const io = await initSocketIO(httpServer);
     initVideoSocket(io);
     app.log.info('WebSocket (Socket.io) server ready');
 

@@ -5,6 +5,7 @@ import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import { join } from 'path';
 import { env } from '../config/env';
+import { isOriginAllowed } from '../config/cors';
 import { AppError, ValidationError } from './errors';
 
 // Module route imports
@@ -29,16 +30,10 @@ export async function buildServer(): Promise<FastifyInstance> {
     trustProxy: true,
   });
 
-  // CORS
-  const allowedOrigins = [
-    /^http:\/\/localhost(:\d+)?$/, // sviluppo locale (Expo web su qualsiasi porta)
-    /\.railway\.app$/,             // tutti i sottodomini Railway (dev + prod)
-    /\.up\.railway\.app$/,
-  ];
+  // CORS (origini condivise con il WebSocket: config/cors.ts)
   await app.register(cors, {
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // server-to-server / curl
-      const ok = allowedOrigins.some(o => typeof o === 'string' ? o === origin : o.test(origin));
+      const ok = isOriginAllowed(origin);
       cb(ok ? null : new Error('CORS not allowed'), ok);
     },
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
