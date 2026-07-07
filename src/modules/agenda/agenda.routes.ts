@@ -34,6 +34,11 @@ export async function agendaRoutes(app: FastifyInstance): Promise<void> {
   app.post('/api/events/:id/participants', auth, ctrl.addParticipant);
   app.delete('/api/events/:id/participants/:userId', auth, ctrl.removeParticipant);
 
+  // ── Guests (inviti, anche via email a chi non ha account) ──
+  app.post('/api/events/:id/guests', auth, ctrl.inviteGuest);
+  app.delete('/api/events/:id/guests/:guestId', auth, ctrl.removeGuest);
+  app.put('/api/events/:id/guests/respond', auth, ctrl.respondAsGuest);
+
   // ── Attachments ──
   app.post('/api/events/:id/attachments', auth, ctrl.uploadAttachments);
   app.get('/api/events/:id/attachments', auth, ctrl.listAttachments);

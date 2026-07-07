@@ -8,6 +8,7 @@ import { syncEventToGCalAsync, deleteEventFromGCalAsync } from './gcalendar.hook
 import { triggerNewEvent } from '../../core/notifications/triggers';
 import { getEffectiveLevel } from '../sharing/sharing.service';
 import { invalidateEvent } from './availability-engine';
+import * as guestsService from './guests.service';
 import { saveUploadedFile, deleteUploadedFile, getAbsolutePath } from '../../shared/file-upload';
 import { existsSync } from 'fs';
 
@@ -340,11 +341,13 @@ export async function getEventById(eventId: string, requesterId: string): Promis
 
   if (!event) throw new NotFoundError('Event not found');
 
-  // Check access: must be owner or participant
-  const isParticipant = await queryOne(
+  // Check access: must be owner or participant (o invitato guest, 047)
+  const isParticipantRow = await queryOne(
     `SELECT 1 FROM event_participants WHERE event_id = $1 AND user_id = $2`,
     [eventId, requesterId]
   );
+  const isParticipant =
+    !!isParticipantRow || (await guestsService.isGuest(eventId, requesterId));
 
   // Also check if requester is admin/owner or has calendar permission
   const requester = await queryOne<{ role: Role }>(
@@ -423,12 +426,22 @@ export async function getEventById(eventId: string, requesterId: string): Promis
   // Sprint 3.5.1: link esterni dell'evento (post-style).
   const externalLinks = await fetchExternalLinks(eventId);
 
+  // Inviti guest (047): roster, flag "gli invitati possono invitare" e
+  // can_invite calcolato per il richiedente (la UI si limita a rispecchiarlo).
+  const guests = await guestsService.listGuests(eventId);
+  const canInviteFlag = await guestsService.canInvite(
+    event as any,
+    requesterId
+  );
+
   return {
     ...event,
     participants,
     attachments,
     linked_event: linkedEvent,
     external_links: externalLinks,
+    guests,
+    can_invite: canInviteFlag,
   };
 }
 
@@ -819,6 +832,8 @@ export async function updateEvent(
   if (input.recurrenceRule !== undefined) addSet('recurrence_rule', input.recurrenceRule || null);
   if (input.isPrivate !== undefined) addSet('is_private', input.isPrivate);
   if (input.alarmMinutesBefore !== undefined) addSet('alarm_minutes_before', input.alarmMinutesBefore);
+  // 047: toggle "gli invitati possono invitare altre persone".
+  if (input.allowGuestsToInvite !== undefined) addSet('allow_guests_to_invite', input.allowGuestsToInvite);
   // Sprint 3.5.1: visibility + cover. `visibility` è ENUM, cast esplicito.
   if (input.visibility !== undefined) {
     sets.push(`visibility = $${idx}::event_visibility`);

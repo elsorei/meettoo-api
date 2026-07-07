@@ -13,6 +13,7 @@ import { BadRequestError, ValidationError } from '../../core/errors';
 import { AuthRequest } from '../../shared/types';
 import { paginate } from '../../shared/pagination';
 import { assertCanViewFreeBusy } from '../sharing/sharing.service';
+import * as guestsService from './guests.service';
 
 // ── CRUD ──
 
@@ -207,6 +208,38 @@ export async function revokeCalendarPermission(request: FastifyRequest, reply: F
 
   await agendaService.revokeCalendarPermission(req.user.userId, viewerUserId);
   return reply.send({ success: true, message: 'Permission revoked' });
+}
+
+// ── GUESTS (inviti, anche via email) ──
+
+export async function inviteGuest(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const { id } = request.params as { id: string };
+  const { email } = (request.body ?? {}) as { email?: string };
+  if (!email) throw new ValidationError('email is required');
+
+  const guest = await guestsService.inviteGuest(id, req.user.userId, email);
+  return reply.status(201).send({ success: true, data: guest });
+}
+
+export async function removeGuest(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const { id, guestId } = request.params as { id: string; guestId: string };
+
+  await guestsService.removeGuest(id, guestId, req.user.userId);
+  return reply.send({ success: true, data: { deleted: true } });
+}
+
+export async function respondAsGuest(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const { id } = request.params as { id: string };
+  const { status } = (request.body ?? {}) as { status?: string };
+  if (status !== 'accepted' && status !== 'declined') {
+    throw new ValidationError("status must be 'accepted' or 'declined'");
+  }
+
+  await guestsService.respondAsGuest(id, req.user.userId, status);
+  return reply.send({ success: true, data: { status } });
 }
 
 // ── Recurring events ──

@@ -11,6 +11,7 @@ import { randomUUID } from 'crypto';
 import { sendEmail } from '../../core/email/mailer';
 import { issueAuthToken, consumeAuthToken } from './auth-tokens.service';
 import { env } from '../../config/env';
+import { linkPendingInvitesToUser } from '../agenda/guests.service';
 
 interface UserRow {
   id: string;
@@ -129,6 +130,14 @@ export async function register(
     await sendVerificationEmail(user.id, normEmail, user.name);
   } catch (err) {
     console.error('[auth] invio email di verifica fallito:', err);
+  }
+
+  // Aggancia gli inviti guest ricevuti via email prima della registrazione:
+  // il nuovo utente trova subito gli eventi a cui è stato invitato.
+  try {
+    await linkPendingInvitesToUser(user.id, normEmail);
+  } catch (err) {
+    console.error('[auth] aggancio inviti pendenti fallito:', err);
   }
 
   const tokens = await issueTokens(user.id, user.role);
@@ -261,6 +270,10 @@ export async function deleteAccount(userId: string, password: string): Promise<v
     );
     await client.query(`DELETE FROM notifications WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM auth_tokens WHERE user_id = $1`, [userId]);
+    await client.query(
+      `DELETE FROM event_guests WHERE user_id = $1 OR LOWER(email) = LOWER($2)`,
+      [userId, user.email ?? '']
+    );
     await client.query(
       `UPDATE users SET
          username = 'deleted_' || id,
