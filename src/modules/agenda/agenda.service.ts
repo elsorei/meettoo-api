@@ -148,6 +148,22 @@ export async function createEvent(
   const ownerId = input.forOperatorUserId || requesterId;
   const createdById = input.forOperatorUserId ? requesterId : null;
 
+  // Creare un evento sull'agenda di QUALCUN ALTRO richiede di essere staff
+  // interno oppure di avere un permesso 'write' concesso dal proprietario.
+  if (ownerId !== requesterId) {
+    const requester = await queryOne<{ role: Role }>(
+      `SELECT role FROM users WHERE id = $1`, [requesterId]
+    );
+    if (!isStaff(requester?.role || 'client')) {
+      const level = await getEffectiveLevel(
+        ownerId, requesterId, requester?.role || 'client', 'agenda'
+      );
+      if (level !== 'write') {
+        throw new ForbiddenError("You cannot create events on another user's agenda");
+      }
+    }
+  }
+
   // Guardia anti-abuso sul feed pubblico: account troppo giovane non può
   // pubblicare in 'public_view'/'public_open' (vedi assertCanPublishPublic).
   await assertCanPublishPublic(ownerId, input.visibility);

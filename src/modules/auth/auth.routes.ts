@@ -3,10 +3,15 @@ import { authenticate } from '../../core/auth/middleware';
 import * as ctrl from './auth.controller';
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
+  // Limiti stretti per-IP sugli endpoint sensibili a brute force e abuso.
+  const strictLimit = (max: number, timeWindow = '1 minute') => ({
+    config: { rateLimit: { max, timeWindow } },
+  });
+
   // Public routes
-  app.post('/api/auth/register', ctrl.registerHandler);
-  app.post('/api/auth/login', ctrl.loginHandler);
-  app.post('/api/auth/refresh', ctrl.refreshHandler);
+  app.post('/api/auth/register', strictLimit(5, '1 minute'), ctrl.registerHandler);
+  app.post('/api/auth/login', strictLimit(10, '1 minute'), ctrl.loginHandler);
+  app.post('/api/auth/refresh', strictLimit(30, '1 minute'), ctrl.refreshHandler);
 
   // Protected routes
   app.post('/api/auth/logout', { preHandler: [authenticate] }, ctrl.logoutHandler);

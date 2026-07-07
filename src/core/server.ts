@@ -1,6 +1,7 @@
 import Fastify, { FastifyInstance, FastifyError, FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
+import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import { join } from 'path';
 import { env } from '../config/env';
@@ -51,6 +52,17 @@ export async function buildServer(): Promise<FastifyInstance> {
       prefix: '/demo/',
     });
   }
+
+  // Rate limiting globale per IP (trustProxy è attivo, quindi request.ip
+  // rispetta X-Forwarded-For dietro il load balancer).
+  // NOTA multi-istanza: lo store è in-memory; quando si scala oltre una
+  // istanza va passato un client Redis condiviso.
+  await app.register(rateLimit, {
+    global: true,
+    max: 300,
+    timeWindow: '1 minute',
+    allowList: (req) => req.url === '/health',
+  });
 
   // Multipart file upload
   await app.register(multipart, {
