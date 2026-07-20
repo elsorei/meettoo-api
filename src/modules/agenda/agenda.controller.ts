@@ -12,6 +12,8 @@ import {
 import { BadRequestError, ValidationError } from '../../core/errors';
 import { AuthRequest } from '../../shared/types';
 import { paginate } from '../../shared/pagination';
+import { assertCanViewFreeBusy } from '../sharing/sharing.service';
+import * as guestsService from './guests.service';
 
 // ── CRUD ──
 
@@ -134,8 +136,11 @@ export async function convertEvent(request: FastifyRequest, reply: FastifyReply)
 // ── AVAILABILITY ──
 
 export async function checkAvailability(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
   const parsed = availabilityQuerySchema.safeParse(request.query);
   if (!parsed.success) throw new ValidationError('Invalid query', parsed.error.flatten());
+
+  await assertCanViewFreeBusy([parsed.data.userId], req.user.userId, req.user.role);
 
   const result = await availabilityService.checkAvailability(
     parsed.data.userId, parsed.data.date,
@@ -146,8 +151,11 @@ export async function checkAvailability(request: FastifyRequest, reply: FastifyR
 }
 
 export async function getBusySlots(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
   const { userId, from, to } = request.query as { userId: string; from: string; to: string };
   if (!userId || !from || !to) throw new ValidationError('userId, from and to are required');
+
+  await assertCanViewFreeBusy([userId], req.user.userId, req.user.role);
 
   const slots = await availabilityService.getBusySlots(userId, from, to);
   return reply.send({ success: true, data: slots });
@@ -202,6 +210,38 @@ export async function revokeCalendarPermission(request: FastifyRequest, reply: F
   return reply.send({ success: true, message: 'Permission revoked' });
 }
 
+// ── GUESTS (inviti, anche via email) ──
+
+export async function inviteGuest(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const { id } = request.params as { id: string };
+  const { email } = (request.body ?? {}) as { email?: string };
+  if (!email) throw new ValidationError('email is required');
+
+  const guest = await guestsService.inviteGuest(id, req.user.userId, email);
+  return reply.status(201).send({ success: true, data: guest });
+}
+
+export async function removeGuest(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const { id, guestId } = request.params as { id: string; guestId: string };
+
+  await guestsService.removeGuest(id, guestId, req.user.userId);
+  return reply.send({ success: true, data: { deleted: true } });
+}
+
+export async function respondAsGuest(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const { id } = request.params as { id: string };
+  const { status } = (request.body ?? {}) as { status?: string };
+  if (status !== 'accepted' && status !== 'declined') {
+    throw new ValidationError("status must be 'accepted' or 'declined'");
+  }
+
+  await guestsService.respondAsGuest(id, req.user.userId, status);
+  return reply.send({ success: true, data: { status } });
+}
+
 // ── Recurring events ──
 
 export async function deleteOccurrence(request: FastifyRequest, reply: FastifyReply) {
@@ -215,19 +255,23 @@ export async function deleteOccurrence(request: FastifyRequest, reply: FastifyRe
 // ── Multi-operator availability ──
 
 export async function checkMultiAvailability(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
   const { userIds, date, startTime, endTime } = request.query as { userIds: string; date: string; startTime: string; endTime: string };
   if (!userIds || !date || !startTime || !endTime) throw new ValidationError('userIds, date, startTime, endTime required');
 
   const ids = userIds.split(',');
+  await assertCanViewFreeBusy(ids, req.user.userId, req.user.role);
   const result = await commonAvail.checkMultiAvailability(ids, date, startTime, endTime);
   return reply.send({ success: true, data: result });
 }
 
 export async function findCommonSlot(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
   const { userIds, fromDate, duration } = request.query as { userIds: string; fromDate: string; duration: string };
   if (!userIds || !fromDate) throw new ValidationError('userIds and fromDate required');
 
   const ids = userIds.split(',');
+  await assertCanViewFreeBusy(ids, req.user.userId, req.user.role);
   const durationMin = parseInt(duration) || 60;
   const slot = await commonAvail.findCommonSlot(ids, fromDate, durationMin);
   return reply.send({ success: true, data: slot });

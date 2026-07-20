@@ -107,6 +107,57 @@ export async function triggerNewsPublished(
 }
 
 /**
+ * Un utente registrato è stato invitato a un evento — notifica lui.
+ * (Chi è invitato via email senza account riceve invece l'email d'invito.)
+ */
+export async function triggerGuestInvited(
+  eventId: string,
+  eventTitle: string,
+  inviterName: string,
+  invitedUserId: string
+): Promise<void> {
+  await createNotification({
+    userId: invitedUserId,
+    type: 'event_invite',
+    title: 'Nuovo invito',
+    body: `${inviterName} ti ha invitato a: ${eventTitle}`,
+    data: { eventId },
+  });
+  await sendPushToUser(invitedUserId, 'Nuovo invito 🎉', `${inviterName} ti ha invitato a ${eventTitle}`, {
+    type: 'event_invite',
+    eventId,
+    url: '/agenda',
+  });
+}
+
+/**
+ * Un invitato ha risposto (RSVP) — notifica l'organizzatore dell'evento.
+ * È il momento sociale chiave: "Giulia ha accettato 🎉".
+ */
+export async function triggerRsvp(
+  eventId: string,
+  eventTitle: string,
+  responderName: string,
+  status: 'accepted' | 'declined',
+  ownerUserId: string
+): Promise<void> {
+  const verb = status === 'accepted' ? 'ha accettato' : 'non parteciperà a';
+  const emoji = status === 'accepted' ? ' 🎉' : '';
+  await createNotification({
+    userId: ownerUserId,
+    type: 'event_rsvp',
+    title: 'Risposta a un invito',
+    body: `${responderName} ${verb}: ${eventTitle}`,
+    data: { eventId },
+  });
+  await sendPushToUser(ownerUserId, `${responderName} ${verb}${emoji}`, eventTitle, {
+    type: 'event_rsvp',
+    eventId,
+    url: '/agenda',
+  });
+}
+
+/**
  * Event reminder (1 day, 6 hours, 1 hour before).
  */
 export async function triggerEventReminder(

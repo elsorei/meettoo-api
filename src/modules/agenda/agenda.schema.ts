@@ -98,6 +98,7 @@ export const updateEventSchema = z.object({
   recurrenceRule: z.string().max(500).optional().nullable(),
   isPrivate: z.boolean().optional(), // 🔒 toggle privacy per evento
   alarmMinutesBefore: z.number().int().min(0).max(10080).optional().nullable(), // promemoria: minuti prima
+  allowGuestsToInvite: z.boolean().optional(), // 047: gli invitati possono invitare
   // ── Sprint 3.5.1: visibilità a scaglioni + cover + link esterni ──
   visibility: eventVisibilitySchema.optional(),
   coverAttachmentId: z.string().uuid().nullable().optional(),

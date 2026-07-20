@@ -3,11 +3,12 @@ import { PoolClient } from 'pg';
 import { RRule } from 'rrule';
 import { NotFoundError, ForbiddenError, BadRequestError } from '../../core/errors';
 import { CreateEventInput, UpdateEventInput, ListEventsQuery } from './agenda.schema';
-import { Role, hasMinimumRole } from '../../core/auth/roles';
+import { Role, hasMinimumRole, isStaff } from '../../core/auth/roles';
 import { syncEventToGCalAsync, deleteEventFromGCalAsync } from './gcalendar.hooks';
-import { triggerNewEvent } from '../../core/notifications/triggers';
+import { triggerNewEvent, triggerRsvp } from '../../core/notifications/triggers';
 import { getEffectiveLevel } from '../sharing/sharing.service';
 import { invalidateEvent } from './availability-engine';
+import * as guestsService from './guests.service';
 import { saveUploadedFile, deleteUploadedFile, getAbsolutePath } from '../../shared/file-upload';
 import { existsSync } from 'fs';
 
@@ -147,6 +148,22 @@ export async function createEvent(
   // created_by_id traccia chi ha creato/assegnato l'evento.
   const ownerId = input.forOperatorUserId || requesterId;
   const createdById = input.forOperatorUserId ? requesterId : null;
+
+  // Creare un evento sull'agenda di QUALCUN ALTRO richiede di essere staff
+  // interno oppure di avere un permesso 'write' concesso dal proprietario.
+  if (ownerId !== requesterId) {
+    const requester = await queryOne<{ role: Role }>(
+      `SELECT role FROM users WHERE id = $1`, [requesterId]
+    );
+    if (!isStaff(requester?.role || 'client')) {
+      const level = await getEffectiveLevel(
+        ownerId, requesterId, requester?.role || 'client', 'agenda'
+      );
+      if (level !== 'write') {
+        throw new ForbiddenError("You cannot create events on another user's agenda");
+      }
+    }
+  }
 
   // Guardia anti-abuso sul feed pubblico: account troppo giovane non può
   // pubblicare in 'public_view'/'public_open' (vedi assertCanPublishPublic).
@@ -324,11 +341,13 @@ export async function getEventById(eventId: string, requesterId: string): Promis
 
   if (!event) throw new NotFoundError('Event not found');
 
-  // Check access: must be owner or participant
-  const isParticipant = await queryOne(
+  // Check access: must be owner or participant (o invitato guest, 047)
+  const isParticipantRow = await queryOne(
     `SELECT 1 FROM event_participants WHERE event_id = $1 AND user_id = $2`,
     [eventId, requesterId]
   );
+  const isParticipant =
+    !!isParticipantRow || (await guestsService.isGuest(eventId, requesterId));
 
   // Also check if requester is admin/owner or has calendar permission
   const requester = await queryOne<{ role: Role }>(
@@ -345,9 +364,16 @@ export async function getEventById(eventId: string, requesterId: string): Promis
   const isPubliclyReadable = PUBLIC_VISIBILITIES.has(event.visibility);
 
   if (!isParticipant && !isOwner && !isCreator && !isAdmin && !isPubliclyReadable) {
-    // Operatori possono vedere le agende dei colleghi senza permessi espliciti
-    if (requester?.role !== 'operator') {
-      throw new ForbiddenError('You do not have access to this event');
+    // Solo lo staff interno (operator+) vede le agende dei colleghi senza
+    // permessi espliciti. Gli account consumer ('user'/'client') devono avere
+    // un permesso white/write concesso dal proprietario dell'evento.
+    if (!isStaff(requester?.role || 'client')) {
+      const level = await getEffectiveLevel(
+        event.owner_id, requesterId, requester?.role || 'client', 'agenda'
+      );
+      if (level !== 'white' && level !== 'write') {
+        throw new ForbiddenError('You do not have access to this event');
+      }
     }
   }
 
@@ -400,12 +426,34 @@ export async function getEventById(eventId: string, requesterId: string): Promis
   // Sprint 3.5.1: link esterni dell'evento (post-style).
   const externalLinks = await fetchExternalLinks(eventId);
 
+  // Inviti guest (047): roster, flag "gli invitati possono invitare" e
+  // can_invite calcolato per il richiedente (la UI si limita a rispecchiarlo).
+  const canInviteFlag = await guestsService.canInvite(
+    event as any,
+    requesterId
+  );
+
+  // Le email degli invitati sono PII: un evento pubblico è leggibile da
+  // chiunque, ma il roster con le email va mostrato solo a chi ha una
+  // relazione con l'evento (owner/creator/partecipante/invitato/admin).
+  // Agli altri (visitatori di un evento pubblico) diamo solo il conteggio.
+  const isInsider = isOwner || isCreator || isParticipant || isAdmin;
+  const guests = isInsider
+    ? await guestsService.listGuests(eventId)
+    : [];
+  const guestCount = isInsider
+    ? guests.length
+    : await guestsService.countGuests(eventId);
+
   return {
     ...event,
     participants,
     attachments,
     linked_event: linkedEvent,
     external_links: externalLinks,
+    guests,
+    guest_count: guestCount,
+    can_invite: canInviteFlag,
   };
 }
 
@@ -524,10 +572,19 @@ export async function getCalendarEvents(
 ): Promise<any[]> {
   const targetUserId = operatorId || requesterId;
 
-  // Tutti gli operatori/admin/owner possono vedere le agende dei colleghi.
-  // Solo i client non possono accedere ai calendari degli operatori.
-  if (operatorId && operatorId !== requesterId && requesterRole === 'client') {
-    throw new ForbiddenError('No permission to view this calendar');
+  // Solo lo staff interno (operator/admin/owner) può aprire i calendari dei
+  // colleghi senza permesso esplicito. Gli account consumer ('user'/'client')
+  // possono vedere il calendario di un altro utente SOLO se questi ha
+  // concesso un permesso in share_permissions (anche solo 'ghost').
+  if (operatorId && operatorId !== requesterId && !isStaff(requesterRole)) {
+    const grant = await queryOne<{ level: string }>(
+      `SELECT level FROM share_permissions
+       WHERE resource_type = 'agenda' AND grantor_user_id = $1 AND grantee_user_id = $2`,
+      [operatorId, requesterId]
+    );
+    if (!grant) {
+      throw new ForbiddenError('No permission to view this calendar');
+    }
   }
 
   // Quando si guarda il calendario di un altro operatore, applichiamo il
@@ -787,6 +844,8 @@ export async function updateEvent(
   if (input.recurrenceRule !== undefined) addSet('recurrence_rule', input.recurrenceRule || null);
   if (input.isPrivate !== undefined) addSet('is_private', input.isPrivate);
   if (input.alarmMinutesBefore !== undefined) addSet('alarm_minutes_before', input.alarmMinutesBefore);
+  // 047: toggle "gli invitati possono invitare altre persone".
+  if (input.allowGuestsToInvite !== undefined) addSet('allow_guests_to_invite', input.allowGuestsToInvite);
   // Sprint 3.5.1: visibility + cover. `visibility` è ENUM, cast esplicito.
   if (input.visibility !== undefined) {
     sets.push(`visibility = $${idx}::event_visibility`);
@@ -1015,6 +1074,23 @@ export async function confirmParticipation(
      WHERE event_id = $2 AND user_id = $3`,
     [confirmation, eventId, userId]
   );
+
+  // Notifica l'organizzatore della singola risposta ("X ha accettato 🎉").
+  // Best-effort e solo per accepted/declined (non per un ritorno a pending).
+  if (confirmation === 'accepted' || confirmation === 'declined') {
+    try {
+      const info = await queryOne<{ owner_id: string; title: string; responder: string }>(
+        `SELECT e.owner_id, e.title, COALESCE(u.name, u.username) AS responder
+         FROM events e, users u WHERE e.id = $1 AND u.id = $2`,
+        [eventId, userId]
+      );
+      if (info && info.owner_id !== userId) {
+        await triggerRsvp(eventId, info.title, info.responder, confirmation, info.owner_id);
+      }
+    } catch (err) {
+      console.error('[agenda] notifica RSVP partecipante fallita:', err);
+    }
+  }
 
   // Check if all participants have confirmed → auto-confirm event
   if (confirmation === 'accepted') {

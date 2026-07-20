@@ -1,14 +1,19 @@
-export type Role = 'client' | 'operator' | 'admin' | 'owner';
+export type Role = 'client' | 'user' | 'operator' | 'admin' | 'owner';
 
 /**
- * Role hierarchy: owner > admin > operator > client
+ * Role hierarchy: owner > admin > operator > user > client
  * Each role inherits permissions of roles below it.
+ *
+ * 'user' è l'account consumer (registrazione pubblica): può usare la propria
+ * agenda ma NON eredita i privilegi di staff ('operator'), che restano
+ * riservati agli account interni.
  */
 const ROLE_LEVEL: Record<Role, number> = {
   client: 0,
-  operator: 1,
-  admin: 2,
-  owner: 3,
+  user: 1,
+  operator: 2,
+  admin: 3,
+  owner: 4,
 };
 
 /**

@@ -1,9 +1,11 @@
 import Fastify, { FastifyInstance, FastifyError, FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
+import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import { join } from 'path';
 import { env } from '../config/env';
+import { isOriginAllowed } from '../config/cors';
 import { AppError, ValidationError } from './errors';
 
 // Module route imports
@@ -16,6 +18,7 @@ import { sharingRoutes } from '../modules/sharing/sharing.routes';
 import { contactsRoutes } from '../modules/contacts/contacts.routes';
 import { feedRoutes } from '../modules/feed/feed.routes';
 import { videoRoutes } from '../modules/video/video.routes';
+import { landingRoutes } from '../modules/landing/landing.routes';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -25,19 +28,16 @@ export async function buildServer(): Promise<FastifyInstance> {
         ? { target: 'pino-pretty', options: { translateTime: 'HH:MM:ss', ignore: 'pid,hostname' } }
         : undefined,
     },
-    trustProxy: true,
+    // Fidati solo di N proxy noti (non di tutti gli hop): così request.ip usa
+    // l'IP client-facing reale e X-Forwarded-For non è spoofabile per bypassare
+    // il rate limiting. Configurabile via TRUST_PROXY (default 1).
+    trustProxy: env().TRUST_PROXY,
   });
 
-  // CORS
-  const allowedOrigins = [
-    /^http:\/\/localhost(:\d+)?$/, // sviluppo locale (Expo web su qualsiasi porta)
-    /\.railway\.app$/,             // tutti i sottodomini Railway (dev + prod)
-    /\.up\.railway\.app$/,
-  ];
+  // CORS (origini condivise con il WebSocket: config/cors.ts)
   await app.register(cors, {
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // server-to-server / curl
-      const ok = allowedOrigins.some(o => typeof o === 'string' ? o === origin : o.test(origin));
+      const ok = isOriginAllowed(origin);
       cb(ok ? null : new Error('CORS not allowed'), ok);
     },
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
@@ -49,6 +49,21 @@ export async function buildServer(): Promise<FastifyInstance> {
     await app.register(fastifyStatic, {
       root: join(__dirname, '..', '..'),
       prefix: '/demo/',
+    });
+  }
+
+  // Rate limiting globale per IP (trustProxy è attivo, quindi request.ip
+  // rispetta X-Forwarded-For dietro il load balancer).
+  // NOTA multi-istanza: lo store è in-memory; quando si scala oltre una
+  // istanza va passato un client Redis condiviso.
+  // In NODE_ENV=test il rate limiting è disattivato (i test di integrazione
+  // sparano molte richieste dallo stesso IP); in dev/prod resta attivo.
+  if (env().NODE_ENV !== 'test') {
+    await app.register(rateLimit, {
+      global: true,
+      max: 300,
+      timeWindow: '1 minute',
+      allowList: (req) => req.url === '/health',
     });
   }
 
@@ -137,6 +152,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(contactsRoutes);
   await app.register(feedRoutes);
   await app.register(videoRoutes);
+  await app.register(landingRoutes);
 
   return app;
 }

@@ -1,7 +1,7 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { createReadStream } from 'fs';
 import * as authService from './auth.service';
-import { loginSchema, registerSchema, refreshSchema, changePasswordSchema, updateProfileSchema, dashboardPreferencesSchema, updateTimezoneSchema } from './auth.schema';
+import { loginSchema, registerSchema, refreshSchema, changePasswordSchema, updateProfileSchema, dashboardPreferencesSchema, updateTimezoneSchema, forgotPasswordSchema, resetPasswordSchema } from './auth.schema';
 import { BadRequestError, NotFoundError, ValidationError } from '../../core/errors';
 import { AuthRequest } from '../../shared/types';
 
@@ -42,8 +42,15 @@ export async function refreshHandler(request: FastifyRequest, reply: FastifyRepl
 
 export async function logoutHandler(request: FastifyRequest, reply: FastifyReply) {
   const req = request as AuthRequest;
-  await authService.logout(req.user.userId);
+  // Disconnette solo la sessione (dispositivo) corrente; gli altri device restano attivi.
+  await authService.logout(req.user.userId, req.user.sid);
   return reply.status(200).send({ success: true, message: 'Logged out' });
+}
+
+export async function logoutAllHandler(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  await authService.revokeAllRefreshTokens(req.user.userId);
+  return reply.status(200).send({ success: true, message: 'Logged out from all devices' });
 }
 
 export async function getMeHandler(request: FastifyRequest, reply: FastifyReply) {
@@ -119,6 +126,68 @@ export async function updateDashboardPreferencesHandler(request: FastifyRequest,
 
   const prefs = await authService.updateDashboardPreferences(targetUserId, parsed.data);
   return reply.send({ success: true, data: prefs });
+}
+
+// ── VERIFICA EMAIL ──
+
+export async function requestEmailVerificationHandler(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  await authService.requestEmailVerification(req.user.userId);
+  return reply.send({ success: true, message: 'Email di verifica inviata' });
+}
+
+/**
+ * Conferma via link cliccato nell'email (GET) — risponde con una pagina
+ * HTML minimale, perché l'utente arriva dal client di posta.
+ */
+export async function confirmEmailVerificationHandler(request: FastifyRequest, reply: FastifyReply) {
+  const { token } = request.query as { token?: string };
+  const ok = token ? await authService.confirmEmailVerification(token) : false;
+
+  const title = ok ? 'Email verificata!' : 'Link non valido o scaduto';
+  const body = ok
+    ? 'Il tuo indirizzo è stato confermato. Puoi tornare all\'app MeetToo.'
+    : 'Richiedi un nuovo link di verifica dall\'app MeetToo.';
+  return reply
+    .status(ok ? 200 : 400)
+    .type('text/html; charset=utf-8')
+    .send(`<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head><body style="font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#F4F5FB"><div style="text-align:center;padding:32px;max-width:420px"><h1 style="color:#11131A">${title}</h1><p style="color:#5A6072">${body}</p></div></body></html>`);
+}
+
+// ── RESET PASSWORD ──
+
+export async function forgotPasswordHandler(request: FastifyRequest, reply: FastifyReply) {
+  const parsed = forgotPasswordSchema.safeParse(request.body);
+  if (!parsed.success) {
+    throw new ValidationError('Validation failed', parsed.error.flatten());
+  }
+  await authService.requestPasswordReset(parsed.data.email);
+  // Sempre la stessa risposta: nessuna enumerazione degli account.
+  return reply.send({ success: true, message: 'Se l\'email esiste, riceverai il link di reset' });
+}
+
+export async function resetPasswordHandler(request: FastifyRequest, reply: FastifyReply) {
+  const parsed = resetPasswordSchema.safeParse(request.body);
+  if (!parsed.success) {
+    throw new ValidationError('Validation failed', parsed.error.flatten());
+  }
+  const ok = await authService.confirmPasswordReset(parsed.data.token, parsed.data.newPassword);
+  if (!ok) {
+    throw new BadRequestError('Token non valido o scaduto');
+  }
+  return reply.send({ success: true, message: 'Password aggiornata. Effettua di nuovo il login.' });
+}
+
+// ── CANCELLAZIONE ACCOUNT ──
+
+export async function deleteAccountHandler(request: FastifyRequest, reply: FastifyReply) {
+  const req = request as AuthRequest;
+  const { password } = (request.body ?? {}) as { password?: string };
+  if (!password) {
+    throw new ValidationError('La password è richiesta per cancellare l\'account');
+  }
+  await authService.deleteAccount(req.user.userId, password);
+  return reply.send({ success: true, message: 'Account cancellato' });
 }
 
 // ── PHOTO PROFILO ──

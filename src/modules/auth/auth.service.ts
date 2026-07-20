@@ -1,4 +1,4 @@
-import { queryOne, query } from '../../shared/db';
+import { queryOne, query, transaction } from '../../shared/db';
 import { verifyPassword, hashPassword } from '../../core/auth/password';
 import { signAccessToken, signRefreshToken, verifyRefreshToken, TokenPayload } from '../../core/auth/jwt';
 import { getRedis } from '../../config/redis';
@@ -7,6 +7,11 @@ import { Role } from '../../core/auth/roles';
 import { normalizePhone } from '../../core/phone';
 import { saveUploadedFile, deleteUploadedFile, getAbsolutePath } from '../../shared/file-upload';
 import { existsSync, unlinkSync } from 'fs';
+import { randomUUID } from 'crypto';
+import { sendEmail, escapeHtml } from '../../core/email/mailer';
+import { issueAuthToken, consumeAuthToken } from './auth-tokens.service';
+import { env } from '../../config/env';
+import { linkPendingInvitesToUser } from '../agenda/guests.service';
 
 interface UserRow {
   id: string;
@@ -20,6 +25,7 @@ interface UserRow {
   role: Role;
   is_active: boolean;
   timezone: string;
+  email_verified: boolean;
 }
 
 interface SessionUser {
@@ -29,6 +35,7 @@ interface SessionUser {
   phone: string | null;
   photoUrl: string | null;
   timezone: string;
+  emailVerified: boolean;
 }
 
 interface LoginResult {
@@ -38,7 +45,7 @@ interface LoginResult {
 }
 
 const SELECT_USER =
-  'id, username, email, name, phone, photo_url, password_hash, password_version, role, is_active, timezone';
+  'id, username, email, name, phone, photo_url, password_hash, password_version, role, is_active, timezone, email_verified';
 
 function toSessionUser(row: UserRow): SessionUser {
   return {
@@ -48,19 +55,35 @@ function toSessionUser(row: UserRow): SessionUser {
     phone: row.phone,
     photoUrl: row.photo_url,
     timezone: row.timezone,
+    emailVerified: row.email_verified,
   };
 }
 
+const REFRESH_TTL_SECONDS = 30 * 24 * 3600;
+
+/** Chiave Redis del refresh token di una singola sessione (dispositivo). */
+const refreshKey = (userId: string, sid: string) => `refresh:${userId}:${sid}`;
+/** Set Redis con i sid delle sessioni attive dell'utente. */
+const sessionsKey = (userId: string) => `sessions:${userId}`;
+
+/**
+ * Emette una coppia di token per una NUOVA sessione (dispositivo).
+ * Ogni login crea un sid indipendente: accedere dal tablet non disconnette
+ * il telefono. Il refresh token vive in Redis per revoca puntuale o globale.
+ */
 async function issueTokens(
   userId: string,
   role: Role
 ): Promise<{ accessToken: string; refreshToken: string }> {
-  const payload: TokenPayload = { userId, role };
+  const sid = randomUUID();
+  const payload: TokenPayload = { userId, role, sid };
   const accessToken = signAccessToken(payload);
   const refreshToken = signRefreshToken(payload);
-  // Store refresh token in Redis (for invalidation on logout)
+
   const redis = await getRedis();
-  await redis.set(`refresh:${userId}`, refreshToken, { EX: 30 * 24 * 3600 });
+  await redis.set(refreshKey(userId, sid), refreshToken, { EX: REFRESH_TTL_SECONDS });
+  await redis.sAdd(sessionsKey(userId), sid);
+  await redis.expire(sessionsKey(userId), REFRESH_TTL_SECONDS);
   return { accessToken, refreshToken };
 }
 
@@ -93,7 +116,7 @@ export async function register(
   const passwordHash = await hashPassword(password);
   const user = await queryOne<UserRow>(
     `INSERT INTO users (username, email, name, phone, password_hash, password_version, role, is_active)
-     VALUES ($1, $1, $2, $3, $4, 2, 'operator', true)
+     VALUES ($1, $1, $2, $3, $4, 2, 'user', true)
      RETURNING ${SELECT_USER}`,
     [normEmail, name.trim(), normPhone, passwordHash]
   );
@@ -101,8 +124,193 @@ export async function register(
     throw new BadRequestError('Registrazione non riuscita');
   }
 
+  // Invio email di verifica best-effort: la registrazione non fallisce
+  // se l'SMTP è giù, l'utente può richiederla di nuovo dall'app.
+  try {
+    await sendVerificationEmail(user.id, normEmail, user.name);
+  } catch (err) {
+    console.error('[auth] invio email di verifica fallito:', err);
+  }
+
+  // Aggancia gli inviti guest ricevuti via email prima della registrazione:
+  // il nuovo utente trova subito gli eventi a cui è stato invitato.
+  try {
+    await linkPendingInvitesToUser(user.id, normEmail);
+  } catch (err) {
+    console.error('[auth] aggancio inviti pendenti fallito:', err);
+  }
+
   const tokens = await issueTokens(user.id, user.role);
   return { ...tokens, user: toSessionUser(user) };
+}
+
+// ── VERIFICA EMAIL ──
+
+async function sendVerificationEmail(userId: string, email: string, name: string | null): Promise<void> {
+  const token = await issueAuthToken(userId, 'verify_email');
+  const link = `${env().APP_URL}/api/auth/verify-email/confirm?token=${token}`;
+  await sendEmail(
+    email,
+    'Conferma il tuo indirizzo email — MeetToo',
+    `Ciao ${name || ''}!\n\nConferma il tuo indirizzo email aprendo questo link:\n${link}\n\nIl link scade tra 24 ore. Se non ti sei registrato su MeetToo, ignora questa email.`,
+    `<p>Ciao ${escapeHtml(name || '')}!</p><p>Conferma il tuo indirizzo email cliccando il pulsante:</p><p><a href="${link}" style="background:#5A4AF4;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none">Conferma email</a></p><p>Il link scade tra 24 ore. Se non ti sei registrato su MeetToo, ignora questa email.</p>`
+  );
+}
+
+/** Richiede (di nuovo) l'email di verifica per l'utente autenticato. */
+export async function requestEmailVerification(userId: string): Promise<void> {
+  const user = await queryOne<UserRow>(
+    `SELECT ${SELECT_USER} FROM users WHERE id = $1`, [userId]
+  );
+  if (!user) throw new NotFoundError('Utente non trovato');
+  if (!user.email) throw new BadRequestError('Nessuna email associata all\'account');
+  if (user.email_verified) throw new BadRequestError('Email già verificata');
+  await sendVerificationEmail(user.id, user.email, user.name);
+}
+
+/** Conferma la verifica email tramite token. Ritorna false se token non valido. */
+export async function confirmEmailVerification(token: string): Promise<boolean> {
+  const userId = await consumeAuthToken(token, 'verify_email');
+  if (!userId) return false;
+  await query(
+    `UPDATE users SET email_verified = true, email_verified_at = NOW(), updated_at = NOW() WHERE id = $1`,
+    [userId]
+  );
+  return true;
+}
+
+// ── RESET PASSWORD ──
+
+/**
+ * Richiede il reset password. Risponde sempre allo stesso modo
+ * (nessuna enumerazione degli account): se l'email esiste, invia il link.
+ */
+export async function requestPasswordReset(email: string): Promise<void> {
+  const user = await queryOne<UserRow>(
+    `SELECT ${SELECT_USER} FROM users WHERE LOWER(email) = $1 AND is_active = true`,
+    [email.trim().toLowerCase()]
+  );
+  if (!user || !user.email) return;
+
+  const token = await issueAuthToken(user.id, 'password_reset');
+  const link = `${env().APP_URL}/reset-password?token=${token}`;
+  await sendEmail(
+    user.email,
+    'Reimposta la tua password — MeetToo',
+    `Ciao ${user.name || ''}!\n\nPer reimpostare la password apri questo link:\n${link}\n\nIl link scade tra 1 ora. Se non hai richiesto il reset, ignora questa email: la tua password resta invariata.`,
+    `<p>Ciao ${escapeHtml(user.name || '')}!</p><p>Per reimpostare la password clicca il pulsante:</p><p><a href="${link}" style="background:#5A4AF4;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none">Reimposta password</a></p><p>Il link scade tra 1 ora. Se non hai richiesto il reset, ignora questa email: la tua password resta invariata.</p>`
+  );
+}
+
+/**
+ * Completa il reset: imposta la nuova password e revoca tutte le sessioni
+ * (refresh token) esistenti dell'utente.
+ */
+export async function confirmPasswordReset(token: string, newPassword: string): Promise<boolean> {
+  const userId = await consumeAuthToken(token, 'password_reset');
+  if (!userId) return false;
+
+  const newHash = await hashPassword(newPassword);
+  await query(
+    `UPDATE users SET password_hash = $1, password_version = 2, updated_at = NOW() WHERE id = $2`,
+    [newHash, userId]
+  );
+  await revokeAllRefreshTokens(userId);
+  return true;
+}
+
+/** Revoca tutti i refresh token dell'utente (logout globale, tutti i device). */
+export async function revokeAllRefreshTokens(userId: string): Promise<void> {
+  const redis = await getRedis();
+  const keys = new Set<string>();
+
+  // Sorgente primaria: il set delle sessioni.
+  for (const sid of await redis.sMembers(sessionsKey(userId))) {
+    keys.add(refreshKey(userId, sid));
+  }
+  // Fallback difensivo: SCAN per catturare eventuali refresh:{userId}:*
+  // orfani (set scaduto prima del token, sessioni legacy). SCAN è O(N) sul
+  // keyspace ma è un'operazione rara (reset/logout-all/cancellazione).
+  for await (const key of redis.scanIterator({ MATCH: `refresh:${userId}:*`, COUNT: 100 })) {
+    if (Array.isArray(key)) key.forEach((k) => keys.add(k));
+    else keys.add(key);
+  }
+  // Include anche la chiave legacy pre-multi-device.
+  keys.add(`refresh:${userId}`);
+
+  await redis.del([...keys]);
+  await redis.del(sessionsKey(userId));
+}
+
+// ── CANCELLAZIONE ACCOUNT (GDPR) ──
+
+/**
+ * Cancella l'account dell'utente autenticato (richiede la password).
+ *
+ * Soft-delete con anonimizzazione: il record users resta (gli eventi passati
+ * riferiscono owner_id senza cascade) ma tutti i dati personali vengono
+ * rimossi e le credenziali invalidate. In transazione:
+ *   - annulla gli eventi futuri di cui è owner
+ *   - rimuove partecipazioni, permessi condivisi, contatti, notifiche, token
+ *   - anonimizza il record utente e lo disattiva
+ * Infine revoca tutti i refresh token.
+ */
+export async function deleteAccount(userId: string, password: string): Promise<void> {
+  const user = await queryOne<UserRow>(
+    `SELECT ${SELECT_USER} FROM users WHERE id = $1 AND is_active = true`,
+    [userId]
+  );
+  if (!user) throw new NotFoundError('Utente non trovato');
+
+  const { valid } = await verifyPassword(password, user.password_hash, user.password_version);
+  if (!valid) throw new BadRequestError('Password non corretta');
+
+  await transaction(async (client) => {
+    await client.query(
+      `UPDATE events SET status = 'cancelled', updated_at = NOW()
+       WHERE owner_id = $1 AND event_date >= CURRENT_DATE AND status <> 'cancelled'`,
+      [userId]
+    );
+    await client.query(`DELETE FROM event_participants WHERE user_id = $1`, [userId]);
+    await client.query(
+      `DELETE FROM share_permissions WHERE grantor_user_id = $1 OR grantee_user_id = $1`,
+      [userId]
+    );
+    await client.query(
+      `DELETE FROM contacts WHERE requester_id = $1 OR addressee_id = $1`,
+      [userId]
+    );
+    await client.query(`DELETE FROM notifications WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM auth_tokens WHERE user_id = $1`, [userId]);
+    await client.query(
+      `DELETE FROM event_guests WHERE user_id = $1 OR LOWER(email) = LOWER($2)`,
+      [userId, user.email ?? '']
+    );
+    await client.query(
+      `UPDATE users SET
+         username = 'deleted_' || id,
+         email = NULL,
+         name = 'Utente eliminato',
+         phone = NULL,
+         photo_url = NULL,
+         fcm_token = NULL,
+         password_hash = '!',
+         password_version = 2,
+         email_verified = false,
+         is_active = false,
+         dashboard_preferences = '{}',
+         deleted_at = NOW(),
+         updated_at = NOW()
+       WHERE id = $1`,
+      [userId]
+    );
+  });
+
+  // Fuori dalla transazione: file foto e sessioni.
+  if (user.photo_url) {
+    deleteUploadedFile(user.photo_url);
+  }
+  await revokeAllRefreshTokens(userId);
 }
 
 /** Accesso consumer tramite email + password. */
@@ -153,9 +361,15 @@ export async function refreshTokens(token: string): Promise<{ accessToken: strin
     throw new UnauthorizedError('Invalid refresh token');
   }
 
-  // Check if refresh token matches stored one (not revoked)
+  // Token emessi prima del multi-device (senza sid): non più validi.
+  if (!payload.sid) {
+    throw new UnauthorizedError('Refresh token revoked');
+  }
+
+  // La sessione deve esistere in Redis e il token deve combaciare (rotazione:
+  // un refresh token già ruotato non è riutilizzabile).
   const redis = await getRedis();
-  const stored = await redis.get(`refresh:${payload.userId}`);
+  const stored = await redis.get(refreshKey(payload.userId, payload.sid));
   if (stored !== token) {
     throw new UnauthorizedError('Refresh token revoked');
   }
@@ -169,18 +383,34 @@ export async function refreshTokens(token: string): Promise<{ accessToken: strin
     throw new UnauthorizedError('Account not found or disabled');
   }
 
-  const newPayload: TokenPayload = { userId: payload.userId, role: user.role };
+  // Rotazione mantenendo lo stesso sid (stessa sessione/dispositivo).
+  const newPayload: TokenPayload = { userId: payload.userId, role: user.role, sid: payload.sid };
   const accessToken = signAccessToken(newPayload);
   const refreshToken = signRefreshToken(newPayload);
 
-  await redis.set(`refresh:${payload.userId}`, refreshToken, { EX: 30 * 24 * 3600 });
+  await redis.set(refreshKey(payload.userId, payload.sid), refreshToken, { EX: REFRESH_TTL_SECONDS });
+  // Rinnova l'appartenenza al set delle sessioni e ne estende il TTL: senza
+  // questo il set scadrebbe a 30 giorni dal LOGIN mentre il refresh token
+  // vive a rotazione infinita, e un logout-all/reset non revocherebbe più
+  // questa sessione (sMembers tornerebbe vuoto).
+  await redis.sAdd(sessionsKey(payload.userId), payload.sid);
+  await redis.expire(sessionsKey(payload.userId), REFRESH_TTL_SECONDS);
 
   return { accessToken, refreshToken };
 }
 
-export async function logout(userId: string): Promise<void> {
+/**
+ * Logout della sessione corrente (solo il dispositivo che lo richiede).
+ * Se il token non ha sid (legacy) revoca tutte le sessioni.
+ */
+export async function logout(userId: string, sid?: string): Promise<void> {
+  if (!sid) {
+    await revokeAllRefreshTokens(userId);
+    return;
+  }
   const redis = await getRedis();
-  await redis.del(`refresh:${userId}`);
+  await redis.del(refreshKey(userId, sid));
+  await redis.sRem(sessionsKey(userId), sid);
 }
 
 export async function changePassword(

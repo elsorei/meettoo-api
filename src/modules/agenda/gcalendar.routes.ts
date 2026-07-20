@@ -3,7 +3,9 @@ import { authenticate, requireRole } from '../../core/auth/middleware';
 import * as ctrl from './gcalendar.controller';
 
 export async function gcalendarRoutes(app: FastifyInstance): Promise<void> {
-  const staffAuth = { preHandler: [authenticate, requireRole('operator')] };
+  // Sync del proprio Google Calendar: aperto a ogni account reale
+  // ('user' consumer e superiori), esclusi i 'client' legacy.
+  const staffAuth = { preHandler: [authenticate, requireRole('user')] };
 
   // Status check
   app.get('/api/gcalendar/status', staffAuth, ctrl.getStatus);

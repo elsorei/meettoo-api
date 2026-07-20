@@ -15,17 +15,11 @@ const envSchema = z.object({
 
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().optional(),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_FROM: z.string().default('MeetToo <noreply@example.com>'),
 
-  IMAP_HOST: z.string().optional(),
-  IMAP_PORT: z.coerce.number().default(993),
-  IMAP_INFO_USER: z.string().optional(),
-  IMAP_INFO_PASS: z.string().optional(),
-  IMAP_FISCALE_USER: z.string().optional(),
-  IMAP_FISCALE_PASS: z.string().optional(),
-  IMAP_LAVORO_USER: z.string().optional(),
-  IMAP_LAVORO_PASS: z.string().optional(),
-
-  APP_URL: z.string().default('https://studiorei-panel-production.up.railway.app'),
+  APP_URL: z.string().default('http://localhost:3000'),
 
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
@@ -37,6 +31,28 @@ const envSchema = z.object({
 
   UPLOAD_DIR: z.string().default('./uploads'),
   MAX_FILE_SIZE: z.coerce.number().default(52428800), // 50MB
+
+  // Numero di proxy fidati davanti all'app (LB/ingress). Determina quale hop
+  // di X-Forwarded-For diventa request.ip: se troppo alto, il client può
+  // spoofare l'header e aggirare il rate limiting. Railway/molti PaaS = 1.
+  TRUST_PROXY: z.coerce.number().int().min(0).default(1),
+
+  // ── Funnel invito → installazione (pagina web + universal/app links) ──
+  // Link agli store (mostrati nella pagina web dell'evento a chi non ha l'app).
+  APP_STORE_URL: z.string().default('https://apps.apple.com/app/idXXXXXXXXXX'),
+  PLAY_STORE_URL: z.string().default('https://play.google.com/store/apps/details?id=it.studiorei.meettoo'),
+  // Scheme deep-link dell'app (deve combaciare con app.json → expo.scheme).
+  APP_SCHEME: z.string().default('meettoo'),
+  // iOS Universal Links: "<TEAM_ID>.<bundleIdentifier>" (es. ABCDE12345.it.studiorei.meettoo).
+  IOS_APP_ID: z.string().default('TEAMID.it.studiorei.meettoo'),
+  // Android App Links: package + SHA-256 del certificato di firma (da `eas credentials`).
+  ANDROID_PACKAGE: z.string().default('it.studiorei.meettoo'),
+  ANDROID_SHA256: z.string().default('AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99'),
+
+  // Pagine legali (privacy/termini) servite dall'API su /privacy e /terms —
+  // usate come URL nelle schede store.
+  COMPANY_NAME: z.string().default('Studio REI'),
+  PRIVACY_CONTACT_EMAIL: z.string().default('privacy@studiorei.it'),
 });
 
 export type Env = z.infer<typeof envSchema>;
