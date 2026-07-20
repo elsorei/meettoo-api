@@ -48,6 +48,68 @@ export async function landingRoutes(app: FastifyInstance): Promise<void> {
     const ev = await getLandingEvent(id);
     return reply.type('text/html; charset=utf-8').send(renderPage(id, ev));
   });
+
+  // ── Privacy policy (URL richiesto dagli store) ──
+  app.get('/privacy', async (_req, reply) => {
+    return reply.type('text/html; charset=utf-8').send(renderPrivacy());
+  });
+}
+
+function renderPrivacy(): string {
+  const company = escapeHtml(env().COMPANY_NAME);
+  const email = escapeHtml(env().PRIVACY_CONTACT_EMAIL);
+  return `<!doctype html>
+<html lang="it"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Informativa sulla Privacy — MeetToo</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    max-width: 720px; margin: 0 auto; padding: 32px 20px; color: #11131A; line-height: 1.6; }
+  h1 { font-size: 28px; } h2 { font-size: 19px; margin-top: 28px; color: #5A4AF4; }
+  a { color: #5A4AF4; } .muted { color: #5A6072; font-size: 14px; }
+  code { background: #F4F5FB; padding: 2px 6px; border-radius: 4px; }
+</style></head><body>
+<h1>Informativa sulla Privacy — MeetToo</h1>
+<p class="muted">MeetToo, sviluppata da ${company}, è un'agenda sociale per creare eventi e invitare persone.</p>
+
+<h2>Dati che raccogliamo</h2>
+<ul>
+  <li><strong>Account</strong>: email, nome e, se lo fornisci, numero di telefono.</li>
+  <li><strong>Contenuti</strong>: eventi (titolo, data, ora, luogo, descrizione) e lista invitati.</li>
+  <li><strong>Inviti</strong>: l'email di chi inviti, per recapitare l'invito. Se la persona non ha un
+      account, l'email resta in attesa che si registri o che l'evento sia eliminato.</li>
+  <li><strong>Dati tecnici</strong>: token di sessione e, se abiliti le notifiche, un identificativo
+      del dispositivo per le notifiche push.</li>
+</ul>
+<p>Non raccogliamo geolocalizzazione precisa in background e non vendiamo i tuoi dati a terzi.</p>
+
+<h2>Perché li usiamo</h2>
+<ul>
+  <li>Erogare il servizio (autenticazione, eventi, inviti, RSVP).</li>
+  <li>Email di servizio: verifica indirizzo, reset password, notifiche su eventi e inviti.</li>
+  <li>Sicurezza e prevenzione degli abusi.</li>
+</ul>
+
+<h2>Conservazione e cancellazione</h2>
+<p>Puoi cancellare l'account in qualsiasi momento da <em>Profilo → Cancella account</em>. Alla
+cancellazione rimuoviamo o anonimizziamo i dati personali (email, nome, telefono, foto), rimuoviamo
+partecipazioni e inviti e revochiamo tutte le sessioni.</p>
+
+<h2>Condivisione con terze parti</h2>
+<p>Usiamo fornitori di infrastruttura (hosting, database, invio email, notifiche push) che trattano i
+dati solo per nostro conto.</p>
+
+<h2>I tuoi diritti (GDPR)</h2>
+<p>Hai diritto di accesso, rettifica, cancellazione, limitazione e portabilità. Per esercitarli scrivi a
+<a href="mailto:${email}">${email}</a>.</p>
+
+<h2>Minori</h2>
+<p>MeetToo non è destinata a minori di 16 anni.</p>
+
+<h2>Contatti</h2>
+<p>Titolare del trattamento: <strong>${company}</strong>. Richieste privacy:
+<a href="mailto:${email}">${email}</a>.</p>
+</body></html>`;
 }
 
 function formatWhen(ev: LandingEvent): string {

@@ -48,6 +48,11 @@ const envSchema = z.object({
   // Android App Links: package + SHA-256 del certificato di firma (da `eas credentials`).
   ANDROID_PACKAGE: z.string().default('it.studiorei.meettoo'),
   ANDROID_SHA256: z.string().default('AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99'),
+
+  // Pagine legali (privacy/termini) servite dall'API su /privacy e /terms —
+  // usate come URL nelle schede store.
+  COMPANY_NAME: z.string().default('Studio REI'),
+  PRIVACY_CONTACT_EMAIL: z.string().default('privacy@studiorei.it'),
 });
 
 export type Env = z.infer<typeof envSchema>;
