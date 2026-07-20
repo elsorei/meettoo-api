@@ -36,6 +36,18 @@ const envSchema = z.object({
   // di X-Forwarded-For diventa request.ip: se troppo alto, il client può
   // spoofare l'header e aggirare il rate limiting. Railway/molti PaaS = 1.
   TRUST_PROXY: z.coerce.number().int().min(0).default(1),
+
+  // ── Funnel invito → installazione (pagina web + universal/app links) ──
+  // Link agli store (mostrati nella pagina web dell'evento a chi non ha l'app).
+  APP_STORE_URL: z.string().default('https://apps.apple.com/app/idXXXXXXXXXX'),
+  PLAY_STORE_URL: z.string().default('https://play.google.com/store/apps/details?id=it.studiorei.meettoo'),
+  // Scheme deep-link dell'app (deve combaciare con app.json → expo.scheme).
+  APP_SCHEME: z.string().default('meettoo'),
+  // iOS Universal Links: "<TEAM_ID>.<bundleIdentifier>" (es. ABCDE12345.it.studiorei.meettoo).
+  IOS_APP_ID: z.string().default('TEAMID.it.studiorei.meettoo'),
+  // Android App Links: package + SHA-256 del certificato di firma (da `eas credentials`).
+  ANDROID_PACKAGE: z.string().default('it.studiorei.meettoo'),
+  ANDROID_SHA256: z.string().default('AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99'),
 });
 
 export type Env = z.infer<typeof envSchema>;
