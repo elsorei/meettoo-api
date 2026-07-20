@@ -5,7 +5,7 @@ import { NotFoundError, ForbiddenError, BadRequestError } from '../../core/error
 import { CreateEventInput, UpdateEventInput, ListEventsQuery } from './agenda.schema';
 import { Role, hasMinimumRole, isStaff } from '../../core/auth/roles';
 import { syncEventToGCalAsync, deleteEventFromGCalAsync } from './gcalendar.hooks';
-import { triggerNewEvent } from '../../core/notifications/triggers';
+import { triggerNewEvent, triggerRsvp } from '../../core/notifications/triggers';
 import { getEffectiveLevel } from '../sharing/sharing.service';
 import { invalidateEvent } from './availability-engine';
 import * as guestsService from './guests.service';
@@ -1074,6 +1074,23 @@ export async function confirmParticipation(
      WHERE event_id = $2 AND user_id = $3`,
     [confirmation, eventId, userId]
   );
+
+  // Notifica l'organizzatore della singola risposta ("X ha accettato 🎉").
+  // Best-effort e solo per accepted/declined (non per un ritorno a pending).
+  if (confirmation === 'accepted' || confirmation === 'declined') {
+    try {
+      const info = await queryOne<{ owner_id: string; title: string; responder: string }>(
+        `SELECT e.owner_id, e.title, COALESCE(u.name, u.username) AS responder
+         FROM events e, users u WHERE e.id = $1 AND u.id = $2`,
+        [eventId, userId]
+      );
+      if (info && info.owner_id !== userId) {
+        await triggerRsvp(eventId, info.title, info.responder, confirmation, info.owner_id);
+      }
+    } catch (err) {
+      console.error('[agenda] notifica RSVP partecipante fallita:', err);
+    }
+  }
 
   // Check if all participants have confirmed → auto-confirm event
   if (confirmation === 'accepted') {

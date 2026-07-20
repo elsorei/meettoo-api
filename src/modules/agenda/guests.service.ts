@@ -2,6 +2,7 @@ import { queryOne, queryMany, query } from '../../shared/db';
 import { NotFoundError, ForbiddenError, BadRequestError } from '../../core/errors';
 import { sendEmail, escapeHtml } from '../../core/email/mailer';
 import { env } from '../../config/env';
+import { triggerGuestInvited, triggerRsvp } from '../../core/notifications/triggers';
 
 export interface GuestRow {
   id: string;
@@ -138,6 +139,23 @@ export async function inviteGuest(
     console.error('[guests] invio email invito fallito:', err);
   }
 
+  // Se l'invitato ha già un account MeetToo, notifica push+in-app (oltre
+  // all'email): è il primo passo del loop sociale. Best-effort.
+  if (existingUser?.id && existingUser.id !== requesterId) {
+    try {
+      const inviter = await queryOne<{ name: string | null; username: string }>(
+        `SELECT name, username FROM users WHERE id = $1`, [requesterId]
+      );
+      await triggerGuestInvited(
+        eventId, event.title,
+        inviter?.name || inviter?.username || 'Un amico',
+        existingUser.id
+      );
+    } catch (err) {
+      console.error('[guests] notifica invito fallita:', err);
+    }
+  }
+
   // Risposta anti-enumeration: NON riveliamo se l'email appartiene a un account
   // (user_id/name risolti). Ritorniamo l'invito così come inserito; il roster
   // completo (con i nomi) è visibile solo a chi ha accesso all'evento.
@@ -196,6 +214,22 @@ export async function respondAsGuest(
     [status, eventId, userId]
   );
   if (!updated) throw new NotFoundError('Non sei tra gli invitati di questo evento');
+
+  // Notifica l'organizzatore ("Giulia ha accettato 🎉"). Best-effort.
+  try {
+    const info = await queryOne<{ owner_id: string; title: string; responder: string }>(
+      `SELECT e.owner_id, e.title,
+              COALESCE(u.name, u.username) AS responder
+       FROM events e, users u
+       WHERE e.id = $1 AND u.id = $2`,
+      [eventId, userId]
+    );
+    if (info && info.owner_id !== userId) {
+      await triggerRsvp(eventId, info.title, info.responder, status, info.owner_id);
+    }
+  } catch (err) {
+    console.error('[guests] notifica RSVP fallita:', err);
+  }
 }
 
 /**
