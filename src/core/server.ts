@@ -55,12 +55,16 @@ export async function buildServer(): Promise<FastifyInstance> {
   // rispetta X-Forwarded-For dietro il load balancer).
   // NOTA multi-istanza: lo store è in-memory; quando si scala oltre una
   // istanza va passato un client Redis condiviso.
-  await app.register(rateLimit, {
-    global: true,
-    max: 300,
-    timeWindow: '1 minute',
-    allowList: (req) => req.url === '/health',
-  });
+  // In NODE_ENV=test il rate limiting è disattivato (i test di integrazione
+  // sparano molte richieste dallo stesso IP); in dev/prod resta attivo.
+  if (env().NODE_ENV !== 'test') {
+    await app.register(rateLimit, {
+      global: true,
+      max: 300,
+      timeWindow: '1 minute',
+      allowList: (req) => req.url === '/health',
+    });
+  }
 
   // Multipart file upload
   await app.register(multipart, {
